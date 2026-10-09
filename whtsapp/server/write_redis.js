@@ -1,1 +1,0 @@
-const fs=require('fs'); const code=module.exports={get:()=>null,set:()=>false,del:()=>0,hashKey:(p)=>'0',isReady:()=>false,getClient:()=>null};; fs.writeFileSync('src/config/redis.js', code, 'utf8'); console.log('ok');
