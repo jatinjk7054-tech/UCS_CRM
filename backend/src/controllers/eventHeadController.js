@@ -2989,6 +2989,13 @@ export const suggestFestivalPrograms = async (req, res) => {
     if (!ngoRow) return res.status(404).json({ message: 'NGO not found' });
     const beneficiaryGroup = requestedGroup || null;
 
+    // Optional free-text location (the row's Location cell — a known spot from
+    // the client's per-NGO list, or anything typed under "Other…"). Carried so
+    // freshly generated suggestions keep the place the block already had, the
+    // same way beneficiary_group is carried; the model re-aligns every stored
+    // row of the festival to it, exactly as it re-applies the beneficiary.
+    const location = String(req.body?.location || '').trim().slice(0, 200) || null;
+
     // Optional sector only provides flavour; it never picks the beneficiary.
     const sectorIdRaw = req.body?.sector_id;
     const sectorId = sectorIdRaw === undefined || sectorIdRaw === null || sectorIdRaw === '' ? null : Number(sectorIdRaw);
@@ -3113,6 +3120,7 @@ export const suggestFestivalPrograms = async (req, res) => {
         observance_date: date,
         festival: observance.name,
         beneficiary: beneficiaryGroup,
+        location,
         sector_name: sectorName,
         activity_name: activityName,
         batch_no: 1,
@@ -3142,6 +3150,7 @@ export const suggestFestivalPrograms = async (req, res) => {
           ngo_id: r.ngo_id,
           activity_id: r.activity_id,
           beneficiary: r.beneficiary,
+          location: r.location ?? null,
           sector_name: r.sector_name,
           activity_name: r.activity_name,
           observance_date: r.observance_date,
@@ -3252,6 +3261,57 @@ export const setFestivalSuggestionsBeneficiary = async (req, res) => {
     return res.json({ updated, beneficiary, suggestions });
   } catch (error) {
     console.error('setFestivalSuggestionsBeneficiary error:', error.message || error);
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+/* Saves the planner's Location dropdown choice onto every stored suggestion of
+   one festival, so the grid, the post-reload fallback, the Excel/PDF export and
+   the Calendar report all show the place the user actually picked — even when
+   they never regenerate. Unlike Beneficiary the value is free text — a known
+   location from the client's per-NGO list, or anything typed under "Other…" —
+   so it is trimmed and bounded here rather than validated against a closed
+   vocabulary, and an empty choice clears the stored spot. */
+export const setFestivalSuggestionsLocation = async (req, res) => {
+  try {
+    const { ngo_id, festival } = req.body || {};
+    const month = Number(req.body?.month);
+    const year = Number(req.body?.year);
+    const date = String(req.body?.date || '').trim();
+    if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year) || year < 2000) {
+      return res.status(400).json({ message: 'month (1-12) and year are required' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'date (YYYY-MM-DD) is required' });
+    if (Number(date.slice(5, 7)) !== month) {
+      return res.status(400).json({ message: 'date must be inside the given month' });
+    }
+    if (!String(festival || '').trim()) return res.status(400).json({ message: 'festival is required' });
+    if (ngo_id === undefined || ngo_id === null || ngo_id === '') {
+      return res.status(400).json({ message: 'ngo_id is required' });
+    }
+    const location = String(req.body?.location || '').trim().slice(0, 200) || null;
+    // Stored rows carry ngo_id exactly as suggestFestivalPrograms wrote it —
+    // a string — so it is passed through uncoerced or the .eq() would miss.
+    const ngoKey = String(ngo_id);
+
+    const updated = await EventHead.setFestivalSuggestionsLocation({
+      ngo_id: ngoKey,
+      month,
+      observance_date: date,
+      festival: String(festival).trim(),
+      location,
+    });
+
+    const suggestions = await EventHead.getFestivalSuggestions({
+      ngo_id: ngoKey,
+      month,
+      year,
+      date,
+      festival: String(festival).trim(),
+    }).catch(() => []);
+    return res.json({ updated, location, suggestions });
+  } catch (error) {
+    console.error('setFestivalSuggestionsLocation error:', error.message || error);
     return res.status(500).json({ message: error.message });
   }
 };

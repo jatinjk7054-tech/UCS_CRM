@@ -940,16 +940,16 @@ export default function MonthlyPlanner() {
       const obsOn = obsByDate.get(date) || []
       const progs = progsByDate.get(date) || []
       if (!obsOn.length && !progs.length) {
-        rows.push({ date, day, festival: '—', ngo: '—', beneficiary: '—', activity: '—', programme: '—' })
+        rows.push({ date, day, festival: '—', ngo: '—', beneficiary: '—', location: '—', activity: '—', programme: '—' })
         continue
       }
       for (const o of obsOn) {
         const p = progs.filter((s) => String(s.festival || '').trim().toLowerCase() === String(o.name || '').trim().toLowerCase())
         if (!p.length) {
-          rows.push({ date, day, festival: o.name, ngo: '—', beneficiary: '—', activity: '—', programme: '—' })
+          rows.push({ date, day, festival: o.name, ngo: '—', beneficiary: '—', location: '—', activity: '—', programme: '—' })
         } else {
           for (const s of p) {
-            rows.push({ date, day, festival: o.name, ngo: ngoNameOf.get(String(s.ngo_id)) || '—', beneficiary: s.beneficiary || '—', activity: s.activity_name || '—', programme: s.title || '—' })
+            rows.push({ date, day, festival: o.name, ngo: ngoNameOf.get(String(s.ngo_id)) || '—', beneficiary: s.beneficiary || '—', location: s.location || '—', activity: s.activity_name || '—', programme: s.title || '—' })
           }
         }
       }
@@ -958,7 +958,7 @@ export default function MonthlyPlanner() {
       const matched = new Set(obsOn.map((o) => String(o.name || '').trim().toLowerCase()))
       for (const s of progs) {
         if (matched.has(String(s.festival || '').trim().toLowerCase())) continue
-        rows.push({ date, day, festival: s.festival || '—', ngo: ngoNameOf.get(String(s.ngo_id)) || '—', beneficiary: s.beneficiary || '—', activity: s.activity_name || '—', programme: s.title || '—' })
+        rows.push({ date, day, festival: s.festival || '—', ngo: ngoNameOf.get(String(s.ngo_id)) || '—', beneficiary: s.beneficiary || '—', location: s.location || '—', activity: s.activity_name || '—', programme: s.title || '—' })
       }
     }
     /* Rule 8: final dedupe before the PDF is built. Unique key date + festival +
@@ -969,7 +969,7 @@ export default function MonthlyPlanner() {
        shows each date once: the date/day cells fill only on the first row of
        that date, so 2026-12-05 never repeats across its festival rows. */
     return {
-      rows: blankRepeatedDates(mergeProgrammeRows(rows, ['date', 'festival', 'ngo', 'beneficiary']), 'date', 'day'),
+      rows: blankRepeatedDates(mergeProgrammeRows(rows, ['date', 'festival', 'ngo', 'beneficiary', 'location']), 'date', 'day'),
       total,
     }
   }
@@ -990,8 +990,8 @@ export default function MonthlyPlanner() {
       const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
       const PAD = 16
       const PAGE_H = 210
-      const headers = ['Date', 'Day', 'Festival / Important Day', 'NGO', 'Beneficiary', 'Activity', 'Selected AI Programme']
-      const widths = [30, 24, 62, 24, 30, 34, 60]
+      const headers = ['Date', 'Day', 'Festival / Important Day', 'NGO', 'Beneficiary', 'Activity', 'Selected AI Programme', 'Location']
+      const widths = [28, 22, 58, 22, 28, 32, 54, 24]
       const tableW = widths.reduce((a, b) => a + b, 0)
       const colX = []
       let acc = PAD
@@ -1019,7 +1019,7 @@ export default function MonthlyPlanner() {
       const lineH = 3.6
       let rowCount = 0
       for (const r of rows) {
-        const cells = [r.date, r.day, r.festival, r.ngo, r.beneficiary, r.activity, r.programme]
+        const cells = [r.date, r.day, r.festival, r.ngo, r.beneficiary, r.activity, r.programme, r.location]
         const wrapped = cells.map((c, i) => doc.splitTextToSize(String(c || ''), widths[i] - 4))
         const rowH = Math.max(5.4, Math.max(...wrapped.map((w) => w.length)) * lineH + 2.2)
         if (ypos + rowH > PAGE_H - 12) {

@@ -23,8 +23,9 @@ router.put('/planner/suggestions/:id/select', eh, ctrl.setPlannerSuggestionSelec
 // per festival row and exported in the monthly download.
 router.post('/planner/suggest-festival-programs', eh, ctrl.suggestFestivalPrograms);
 router.get('/planner/festival-suggestions', eh, ctrl.getFestivalSuggestions);
-// Static path BEFORE /:id/select so "beneficiary" is never read as an id.
+// Static paths BEFORE /:id/select so "beneficiary"/"location" are never read as an id.
 router.put('/planner/festival-suggestions/beneficiary', eh, ctrl.setFestivalSuggestionsBeneficiary);
+router.put('/planner/festival-suggestions/location', eh, ctrl.setFestivalSuggestionsLocation);
 router.put('/planner/festival-suggestions/:id/select', eh, ctrl.setFestivalSuggestionSelected);
 // Events (static paths BEFORE :id)
 router.get('/dashboard/stats', eh, ctrl.getEventHeadDashboardStats);

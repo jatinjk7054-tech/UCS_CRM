@@ -20,6 +20,7 @@ import {
   getFestivalSuggestions,
   setFestivalSuggestionSelected,
   setFestivalSuggestionsBeneficiary,
+  setFestivalSuggestionsLocation,
   mergeProgrammeRows,
   BENEFICIARY_CATEGORIES,
 } from '../store.jsx'
@@ -144,7 +145,7 @@ const REPORT_HEADERS = ['Date', 'Day', 'Activity', 'Programme', 'Status', 'AI Su
    serves it, and what programme did I pick for them?". Sector and Activity were
    dropped because the grid itself does not carry them — the export matches the
    on-screen columns. */
-const FESTIVAL_REPORT_HEADERS = ['Date', 'Day', 'Festival/Important Day', 'NGO', 'Beneficiary', 'AI Suggested Programme', 'Status']
+const FESTIVAL_REPORT_HEADERS = ['Date', 'Day', 'Festival/Important Day', 'NGO', 'Beneficiary', 'AI Suggested Programme', 'Location', 'Status']
 
 /* Marks an activity the user ticked for this download. A tick rather than a word
    so the eye can find the chosen ones down a column, and it survives being copied
@@ -199,7 +200,7 @@ const PRIORITY_TONE = { Urgent: 'danger', Critical: 'danger', High: 'warn', Medi
    event-head are untouched. Rules only restyle/space the table — the row data,
    heading, export and behaviour logic are not involved. */
 const FEST_GRID_CSS = `
-.eh-fest-grid { width: 100%; min-width: 900px; table-layout: fixed; border-collapse: separate; border-spacing: 0; background: #fff; border: 1px solid #E3E6F2; }
+.eh-fest-grid { width: 100%; min-width: 980px; table-layout: fixed; border-collapse: separate; border-spacing: 0; background: #fff; border: 1px solid #E3E6F2; }
 .eh-fest-grid thead th { position: sticky; top: 0; z-index: 5; padding: 10px 14px; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; text-align: left; color: var(--eh-ink-soft, #6f6c86); background: #f3f2fb; border-bottom: 2px solid #d9d5f0; border-right: 1px solid #E3E6F2; white-space: nowrap; }
 .eh-fest-grid thead th:last-child { border-right: none; }
 .eh-fest-grid td { padding: 11px 14px; font-size: 13px; line-height: 1.3; color: var(--eh-ink, #1f2430); border-right: 1px solid #E3E6F2; vertical-align: middle; }
@@ -217,7 +218,11 @@ const FEST_GRID_CSS = `
 .eh-fest-grid td.sel { text-align: center; }
 .eh-fest-grid td.sel input { width: 16px; height: 16px; margin: 0; vertical-align: middle; accent-color: var(--eh-primary, #6c5ce7); cursor: pointer; }
 .eh-fest-grid td.sel input:disabled { cursor: wait; }
-.eh-fest-grid td.dd, .eh-fest-grid td.ff, .eh-fest-grid td.ng, .eh-fest-grid td.bn { border-bottom: none; }
+.eh-fest-grid td.dd, .eh-fest-grid td.ff, .eh-fest-grid td.ng, .eh-fest-grid td.bn, .eh-fest-grid td.lc { border-bottom: none; }
+.eh-fest-grid div.lc { display: flex; flex-direction: column; gap: 6px; }
+.eh-fest-grid input.lc { display: block; width: 100%; box-sizing: border-box; padding: 6px 9px; font-family: inherit; font-size: 12.5px; color: var(--eh-ink, #1f2430); background: #fff; border: 1px solid var(--eh-line, #d1d5db); border-radius: 9px; outline: none; transition: border-color .15s, box-shadow .15s; }
+.eh-fest-grid input.lc:focus { border-color: var(--eh-primary, #2036bd); box-shadow: 0 0 0 3px rgba(32, 54, 189, .12); }
+.eh-fest-grid input.lc:disabled { background: #f7f7fb; cursor: wait; }
 .eh-fest-grid td.divider { border-top: 2px solid #d9d5f0; }
 .eh-fest-grid tbody tr:first-child td.divider { border-top: none; }
 .eh-fest-grid td.subline { border-bottom: 1px solid #E3E6F2; }
@@ -306,6 +311,111 @@ function FestivalBeneficiarySelect({ value, disabled, title, onChange }) {
       <option value="">Select a category…</option>
       {BENEFICIARY_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
     </select>
+  )
+}
+
+/* The grid's Location cell: where this festival's programme happens, one place
+   per block. The dropdown lists ONLY the in-scope NGO's known locations — pick
+   BSCT and you see the Being Sevak Charitable Trust spots, MANN shows Mann's,
+   AFLF shows Ashray's — and "Other…" reveals a free-text box to type any
+   location manually. On "All NGOs" scope every NGO's spots are offered together
+   (there is no single owner to filter by). A custom place is saved on
+   blur/Enter (never per keystroke), and a value typed earlier still shows as
+   "Other…" with the stored text after a reload. */
+const OTHER_LOCATION = '__other__'
+const NGO_LOCATION_GROUPS = [
+  {
+    code: 'bsct', label: 'Being Sevak Charitable Trust', list: [
+      'Ganpat Patil Nagar',
+      'Patel Nagar near Priyansh School',
+      'Satabdi Hospital',
+      'Dahisar Bridge',
+      'Gorai Fast Gali',
+      'Poisar Raghulila Mall',
+    ],
+  },
+  {
+    code: 'mann', label: 'Mann Care Foundation', list: [
+      'Kandivali West opp Satabdi Hospital',
+      'Kandivali West Railway Track',
+      'Borivali Bhagwati BMC Hospital',
+    ],
+  },
+  {
+    code: 'aflf', label: 'Ashray For Life Foundation', list: [
+      'Malad East near Malad Station',
+      'Gorai Slum Gutam Nagar',
+    ],
+  },
+]
+
+const ngoLocationCode = (n) => String(n?.code || '').trim().toLowerCase()
+/* With a single NGO in scope its locations alone are offered; on "All NGOs"
+   there is no owner to filter by, so every NGO's spots are listed. */
+const ngoLocationList = (n) => {
+  if (!n) return NGO_LOCATION_GROUPS.flatMap((g) => g.list)
+  return NGO_LOCATION_GROUPS.find((g) => g.code === ngoLocationCode(n))?.list || []
+}
+
+function FestivalLocationSelect({ value, list, disabled, title, onChange }) {
+  const hasCustom = Boolean(value) && !list.includes(value)
+  const [showOther, setShowOther] = useState(hasCustom)
+  const [draft, setDraft] = useState(hasCustom ? String(value) : '')
+  const selectValue = hasCustom ? OTHER_LOCATION : (showOther ? OTHER_LOCATION : (value || ''))
+  const showingInput = selectValue === OTHER_LOCATION
+  const lastValue = useRef(value)
+  useEffect(() => {
+    if (lastValue.current && !value) setShowOther(false)
+    lastValue.current = value
+  }, [value])
+  const commitDraft = () => {
+    const next = draft.trim().slice(0, 200)
+    setDraft(next)
+    if (next !== value) onChange(next)
+  }
+  return (
+    <div className="lc">
+      <select
+        className="eh-select"
+        value={selectValue}
+        disabled={disabled}
+        title={title}
+        onChange={(e) => {
+          const v = e.target.value
+          if (v === OTHER_LOCATION) {
+            setShowOther(true)
+            setDraft(hasCustom ? String(value) : '')
+          } else {
+            setShowOther(false)
+            setDraft('')
+            onChange(v)
+          }
+        }}
+        style={{ width: '100%', minWidth: 0, padding: '7px 9px', fontSize: 12.5, borderRadius: 9 }}
+      >
+        <option value="">Select a location…</option>
+        {list.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
+        <option value={OTHER_LOCATION}>Other… (type a location)</option>
+      </select>
+      {showingInput && (
+        <input
+          type="text"
+          className="lc"
+          value={draft}
+          disabled={disabled}
+          placeholder="Type the location…"
+          autoFocus
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitDraft}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitDraft()
+              e.currentTarget.blur()
+            }
+          }}
+        />
+      )}
+    </div>
   )
 }
 
@@ -1000,6 +1110,11 @@ export default function ActivityPlanner() {
   // until the user picks another; the new choice reaches the server the next
   // time that festival's programmes are generated.
   const [festBenef, setFestBenef] = useState({})
+  // Pending location choice per festival, keyed "date::festival" — mirrors
+  // festBenef exactly: the new place shows at once, reaches the server when the
+  // festival's rows exist, and is never auto-filled (a row starts on
+  // "Select a location…" and shows only what the user picks).
+  const [festLoc, setFestLoc] = useState({})
   /* Festivals whose suggestion block is open THIS session, keyed
      "date::festival". Stored suggestions are never auto-opened: a reload or a
      navigation back starts every row collapsed on its "✦ Suggest programmes"
@@ -1054,6 +1169,7 @@ export default function ActivityPlanner() {
      block belongs to the NGO it was generated for — every row collapses back
      to its button, so switching NGO or month always starts fresh. */
   useEffect(() => { setFestBenef({}) }, [ngoId])
+  useEffect(() => { setFestLoc({}) }, [ngoId])
   useEffect(() => { setFestOpen(new Set()) }, [ngoId, month])
 
   /* Every selectable day of the month, a festival-less date included. */
@@ -1205,6 +1321,47 @@ export default function ActivityPlanner() {
     }
   }
 
+  /* The place a festival row's Location cell shows: the user's pending choice
+     first, then the spot the stored suggestions actually carry, so a reload
+     keeps showing the truth. Never read from anywhere else — a row starts on
+     "Select a location…" and every shown place was picked or typed. */
+  const festivalLocationFor = useCallback((key) => {
+    if (festLoc[key]) return festLoc[key]
+    const stored = (festivalSuggestionsByKey[key] || []).map((s) => s.location).find(Boolean)
+    return stored || ''
+  }, [festLoc, festivalSuggestionsByKey])
+
+  /* Changing the row's Location dropdown / "Other…" box. Mirrors the
+     Beneficiary handler: the pending choice shows at once, and when the
+     festival already has stored suggestions the server copy is updated too —
+     so the grid, the value after a reload and the Excel/PDF Location column
+     all show exactly what was picked, even if the user never regenerates. The
+     NGO is the one in scope, or the one the stored suggestions actually belong
+     to on "All NGOs". A failed save rolls the row back to what the server
+     holds. */
+  const handleFestivalLocation = async (key, value) => {
+    const prevFor = festivalLocationFor(key)
+    setFestLoc((cur) => ({ ...cur, [key]: value }))
+    const stored = festivalSuggestionsByKey[key] || []
+    if (!stored.length) return // nothing stored yet — the choice travels with the next generation
+    const ownerNgoId = ngoId || stored[0]?.ngo_id
+    if (!ownerNgoId) return
+    const [date, ...rest] = key.split('::')
+    const festival = rest.join('::')
+    const [y, m] = month.split('-').map(Number)
+    try {
+      await setFestivalSuggestionsLocation({ month: m, year: y, ngo_id: ownerNgoId, date, festival, location: value })
+      setFestivalSuggestions((list) => list.map((x) => (
+        String(x.observance_date || '').slice(0, 10) === date && String(x.festival || '') === festival
+          ? { ...x, location: value || null }
+          : x
+      )))
+    } catch (e) {
+      setFestLoc((cur) => ({ ...cur, [key]: prevFor }))
+      showToast(e?.message || 'Could not save the location.')
+    }
+  }
+
   /* Generates a day's programmes for one NGO, aimed at the category chosen in
      that row's Beneficiary dropdown. Nothing runs while the dropdown is empty:
      the programmes must be aimed at a category the user actually picked, never
@@ -1228,6 +1385,8 @@ export default function ActivityPlanner() {
       const res = await suggestFestivalPrograms({
         month, date, festival: festivalName, ngo_id: ngoId, sector_id: sectorFilter || null,
         beneficiary_group: festivalBeneficiaryFor(key) || null,
+        // Keep the block's chosen place on the freshly generated rows.
+        location: festivalLocationFor(key) || null,
       })
       const added = Array.isArray(res?.suggestions) ? res.suggestions : []
       if (added.length) {
@@ -1321,8 +1480,9 @@ export default function ActivityPlanner() {
       const had = cur[fk]
       const merged = { text: '', selected: false, ...(had || {}), ...patch }
       // Nothing real behind it yet (no typed text, no tick, no manual-only
-      // intent) — write nothing, so an accidental focus never pollutes state.
-      if (!had && !merged.text && !merged.selected && !merged.mode) return cur
+      // intent, no event name) — write nothing, so an accidental focus never
+      // pollutes state.
+      if (!had && !merged.text && !merged.selected && !merged.mode && !merged.name) return cur
       return { ...cur, [fk]: merged }
     })
   }
@@ -1807,6 +1967,7 @@ const pendingAll = scopedSuggestions
           festival: s.festival || '—',
           ngoLabel: ngoShortLabel(n),
           beneficiary: s.beneficiary || '—',
+          location: s.location || '—',
           programme: s.title || '—',
           status: s.suggested_event_id ? 'Scheduled' : 'Draft',
         }
@@ -1814,10 +1975,15 @@ const pendingAll = scopedSuggestions
     /* The typed programmes: same row shape, Status always Draft, NGO/beneficiary
        read from the same row the grid shows so the file matches the screen. */
     for (const k of Object.keys(scopedManual)) {
+      const e = scopedManual[k]
       const text = manualText(k)
       if (!text) continue
       const d = k.slice(0, 10)
-      const festival = k.includes('::') ? k.slice(k.indexOf('::') + 2) : ''
+      /* The "No important day" rows are keyed "date::" (no festival), so the
+         Festival column reads the user's typed event name — or the row's own
+         "No important day" label when they never named it. */
+      const festival = (k.includes('::') ? k.slice(k.indexOf('::') + 2) : '')
+        || e?.name || 'No important day'
       rows.push({
         date: d,
         dateLabel: shortDate(d),
@@ -1825,6 +1991,7 @@ const pendingAll = scopedSuggestions
         festival: festival || '—',
         ngoLabel: ngo ? ngoShortLabel(ngo) : '—',
         beneficiary: (festivalSuggestionsByKey[k] || []).map((s) => s.beneficiary).find(Boolean) || festBenef[k] || '—',
+        location: (festivalSuggestionsByKey[k] || []).map((s) => s.location).find(Boolean) || festLoc[k] || '—',
         programme: text,
         status: 'Draft',
       })
@@ -1838,10 +2005,10 @@ const pendingAll = scopedSuggestions
        its ONE row; distinct festivals sharing a date stay separate rows and
        each of them repeats the date and weekday — two festivals on one date
        print that date twice in the file, exactly as the grid shows it. */
-    const merged = mergeProgrammeRows(rows, ['date', 'festival', 'ngoLabel', 'beneficiary'])
+    const merged = mergeProgrammeRows(rows, ['date', 'festival', 'ngoLabel', 'beneficiary', 'location'])
       .map((r) => ({ ...r, title: r.programme }))
     return merged
-  }, [festivalSuggestions, ngos, scopedManual, festivalSuggestionsByKey, festBenef, ngo])
+  }, [festivalSuggestions, ngos, scopedManual, festivalSuggestionsByKey, festBenef, festLoc, ngo])
 
   /* Loads the cut-down rows once, mirrors them into state (which the off-screen
      preview renders and the PDF captures), and waits two frames so the freshly
@@ -1886,7 +2053,7 @@ const pendingAll = scopedSuggestions
         headers,
       ]
       for (const r of rows) {
-        aoa.push([r.dateLabel, r.weekday, r.festival, r.ngoLabel, r.beneficiary, r.title, r.status])
+        aoa.push([r.dateLabel, r.weekday, r.festival, r.ngoLabel, r.beneficiary, r.title, r.location, r.status])
       }
       if (!rows.length) {
         aoa.push([`No programmes selected. Choose an AI suggestion or tick your own Write Manually programme in the Activities grid, then download again — only the selected programme of each festival is listed.`])
@@ -1908,7 +2075,7 @@ const pendingAll = scopedSuggestions
         }
       }
 
-      ws['!cols'] = [{ wch: 11 }, { wch: 9 }, { wch: 26 }, { wch: 9 }, { wch: 20 }, { wch: 60 }, { wch: 10 }]
+      ws['!cols'] = [{ wch: 11 }, { wch: 9 }, { wch: 26 }, { wch: 9 }, { wch: 20 }, { wch: 60 }, { wch: 24 }, { wch: 10 }]
       ws['!rows'] = []
       ws['!rows'][0] = { hpt: 22 }
       for (let r = 7; r < aoa.length; r++) ws['!rows'][r] = { hpt: 64 }
@@ -2347,11 +2514,12 @@ const pendingAll = scopedSuggestions
           <style>{FEST_GRID_CSS}</style>
           <table className="eh-fest-grid">
             <colgroup>
-              <col style={{ width: '9%' }} />
-              <col style={{ width: '25%' }} />
               <col style={{ width: '8%' }} />
-              <col style={{ width: '20%' }} />
-              <col style={{ width: '31%' }} />
+              <col style={{ width: '21%' }} />
+              <col style={{ width: '7%' }} />
+              <col style={{ width: '16%' }} />
+              <col style={{ width: '29%' }} />
+              <col style={{ width: '12%' }} />
               <col style={{ width: '7%' }} />
             </colgroup>
             <thead>
@@ -2361,6 +2529,7 @@ const pendingAll = scopedSuggestions
                 <th>NGO</th>
                 <th>Beneficiary</th>
                 <th>AI Suggestion</th>
+                <th>Location</th>
                 <th>Select</th>
               </tr>
             </thead>
@@ -2368,10 +2537,76 @@ const pendingAll = scopedSuggestions
               {festivalDates.map((date) => {
                 const obs = observancesByDate[date] || []
                 if (!obs.length) {
+                  /* No festival falls on this date — but sometimes a date still
+                     needs an event, so the row is a manual entry rather than a
+                     dead "No important day" label. Same parts as the ✍ Write
+                     Manually row: a name for the event, the programme text, the
+                     Beneficiary + Location dropdowns and the ✓ that carries the
+                     date into the download. Session-only, keyed "date::". */
+                  const key = `${date}::`
+                  const manual = scopedManual[key]
+                  const manualChecked = Boolean(manual?.selected)
+                  const on = manualExportText(key)
                   return (
-                    <tr key={date}>
+                    <tr key={date} className={`sel-row${manualChecked ? ' sel' : ''}`}>
                       <td className="dd divider">{shortDate(date)}</td>
-                      <td className="plain divider" colSpan={5}>No important day</td>
+                      <td className="ff divider" style={{ whiteSpace: 'normal' }}>
+                        <div className="sug-sec-label">No important day</div>
+                        <input
+                          className="eh-input"
+                          value={manual?.name || ''}
+                          disabled={festBusy}
+                          placeholder="Event name (e.g. Community kitchen drive)…"
+                          title="Name the event you are planning for this date — it is what the downloads call it"
+                          onChange={(e) => updateFestivalManual(key, { name: e.target.value })}
+                          style={{ width: '100%', minWidth: 0, marginTop: 5, padding: '7px 9px', fontSize: 12.5, borderRadius: 9, boxSizing: 'border-box', color: 'var(--eh-ink, #1f2430)' }}
+                        />
+                      </td>
+                      <td className="ng divider"><span className="ng-pill">{festivalNgoLabel}</span></td>
+                      <td className="bn divider">
+                        <FestivalBeneficiarySelect
+                          value={festivalBeneficiaryFor(key)}
+                          disabled={festBusy || festGenerating !== null}
+                          title="Who this date's event is aimed at"
+                          onChange={(v) => handleFestivalBeneficiary(key, v)}
+                        />
+                      </td>
+                      <td className="ai divider">
+                        <div className="sug-sec-label">Write manually</div>
+                        <textarea
+                          className="fest-manual"
+                          rows={2}
+                          value={manual?.text || ''}
+                          disabled={festBusy}
+                          placeholder="Type your own programme for this date…"
+                          title="Your own programme for this date"
+                          onChange={(e) => updateFestivalManual(key, { text: e.target.value })}
+                        />
+                        {manualChecked && !on && (
+                          <div className="fest-manual-hint">Type your programme above — an empty box exports nothing.</div>
+                        )}
+                        {manualChecked && on && (
+                          <div className="fest-manual-hint">This date is exported with the programme you typed.</div>
+                        )}
+                      </td>
+                      <td className="lc divider">
+                        <FestivalLocationSelect
+                          value={festivalLocationFor(key)}
+                          list={ngoLocationList(ngo)}
+                          disabled={festBusy || festGenerating !== null}
+                          title="Where this date's event happens"
+                          onChange={(v) => handleFestivalLocation(key, v)}
+                        />
+                      </td>
+                      <td className="sel divider">
+                        <input
+                          type="checkbox"
+                          checked={manualChecked}
+                          disabled={festBusy}
+                          title={manualChecked ? 'This date is in the download. Untick to leave it out.' : 'Include this date’s programme in the download.'}
+                          onChange={(e) => updateFestivalManual(key, { selected: e.target.checked })}
+                        />
+                      </td>
                     </tr>
                   )
                 }
@@ -2465,16 +2700,29 @@ const pendingAll = scopedSuggestions
                             </button>
                           </div>
                         </td>
+                        <td className="lc divider">
+                          <FestivalLocationSelect
+                            value={festivalLocationFor(key)}
+                            list={ngoLocationList(ngo)}
+                            disabled={festBusy || festGenerating !== null}
+                            title={`Where ${o.name}’s programme happens — one place per festival`}
+                            onChange={(v) => handleFestivalLocation(key, v)}
+                          />
+                        </td>
                         <td className="sel divider" />
                       </tr>
                     )
                     return trs
                   }
 
-                  /* The four cells that span the whole block: the date (one copy
-                     per festival, so two festivals on the same date print the
-                     date twice), festival, NGO, and beneficiary + the generate
-                     button. Called exactly ONCE — by the block's first row. */
+                  /* The block's leading cells: the date (one copy per festival, so two
+                     festivals on the same date print the date twice), festival,
+                     NGO, and beneficiary + the generate button. Called exactly
+                     ONCE — by the block's first row. The Location cell is the
+                     fifth one that spans the block, but it must sit between the
+                     per-row AI suggestion and per-row Select cells in column
+                     order, so the row builders render it themselves (see
+                     locationSharedCell below). */
                   const sharedCells = () => {
                     const cells = []
                     cells.push(
@@ -2512,6 +2760,22 @@ const pendingAll = scopedSuggestions
                     )
                     return cells
                   }
+
+                  /* The Location cell, rendered by the row builders AFTER the AI
+                     cell and BEFORE the Select cell. rowSpan keeps it one place
+                     per festival block; following rows in the block simply omit
+                     it and the grid slots stay aligned. */
+                  const locationSharedCell = () => (
+                    <td key="l" className="lc divider" rowSpan={rowCount}>
+                      <FestivalLocationSelect
+                        value={festivalLocationFor(key)}
+                        list={ngoLocationList(ngo)}
+                        disabled={festBusy || festGenerating !== null}
+                        title={`Where ${o.name}’s programme happens — one place per festival`}
+                        onChange={(v) => handleFestivalLocation(key, v)}
+                      />
+                    </td>
+                  )
 
                   /* Dividers: the first row of the block gets the top rule,
                      every row but the last gets the lighter one between ideas. */
@@ -2572,6 +2836,7 @@ const pendingAll = scopedSuggestions
                             </button>
                           )}
                         </td>
+                        {i === 0 ? locationSharedCell() : null}
                         <td className={c.sel}>
                           <input
                             type="checkbox"
@@ -2615,6 +2880,7 @@ const pendingAll = scopedSuggestions
                             </span>
                           )}
                         </td>,
+                        ...(si === 0 ? [locationSharedCell()] : []),
                         <td key="c" className={c.sel}>
                           <input
                             type="radio"
@@ -2658,6 +2924,7 @@ const pendingAll = scopedSuggestions
                           </span>
                         )}
                       </td>,
+                      locationSharedCell(),
                       <td key="c" className={c0.sel}>
                         <button
                           className="sug-check-lg sug-lg-btn"
@@ -2736,6 +3003,7 @@ const pendingAll = scopedSuggestions
                   <td style={{ border: '1px solid #D5D9E4', padding: '5px 6px' }}>{r.ngoLabel}</td>
                   <td style={{ border: '1px solid #D5D9E4', padding: '5px 6px' }}>{r.beneficiary}</td>
                   <td style={{ border: '1px solid #D5D9E4', padding: '5px 6px', whiteSpace: 'pre-wrap', fontWeight: 600 }}>{r.title}</td>
+                  <td style={{ border: '1px solid #D5D9E4', padding: '5px 6px' }}>{r.location}</td>
                   <td style={{ border: '1px solid #D5D9E4', padding: '5px 6px' }}>{r.status}</td>
                 </tr>
               ))}

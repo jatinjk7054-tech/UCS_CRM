@@ -143,6 +143,7 @@ export default function ApplicationDetail({ row, onClose, refresh, startEditOnOp
   const [reason, setReason] = useState('')
   const [renewFee, setRenewFee] = useState('')
   const [renewTxn, setRenewTxn] = useState('')
+  const [renewFrom, setRenewFrom] = useState('')
   const [editing, setEditing] = useState(false)
   const [editValues, setEditValues] = useState(() => buildEditValues(row))
   const [editErrors, setEditErrors] = useState({})
@@ -462,9 +463,13 @@ export default function ApplicationDetail({ row, onClose, refresh, startEditOnOp
       toast('Enter a valid renewal fee.', 'error')
       return
     }
+    if (!renewFrom) {
+      toast('Pick the renewal start date.', 'error')
+      return
+    }
     setBusy('renew')
     try {
-      const data = await renewApplication(row.id, { fee: feeNum, transactionId: txn })
+      const data = await renewApplication(row.id, { fee: feeNum, transactionId: txn, startDate: renewFrom })
       toast(data && data.end_date ? `Membership renewed until ${formatDate(data.end_date)}.` : 'Membership renewed.')
       setConfirm(null)
       refresh()
@@ -887,7 +892,7 @@ export default function ApplicationDetail({ row, onClose, refresh, startEditOnOp
               )}
               {row.status === 'APPROVED' && (
                 <>
-                  <button className="btn-act approve" onClick={() => { setRenewFee(row.membership_fee != null ? String(row.membership_fee) : ''); setRenewTxn(''); setConfirm('renew') }} disabled={!!busy}>
+                  <button className="btn-act approve" onClick={() => { setRenewFee(row.membership_fee != null ? String(row.membership_fee) : ''); setRenewTxn(''); setRenewFrom((renewalPreview(row) || {}).from || ''); setConfirm('renew') }} disabled={!!busy}>
                     <RefreshCw size={15} /> Renew
                   </button>
                   <button className="btn-act pdf" onClick={printPdf} disabled={!!busy}>
@@ -922,14 +927,21 @@ export default function ApplicationDetail({ row, onClose, refresh, startEditOnOp
                 const txnOk = !!String(renewTxn || '').trim()
                 const feeNum = Number(renewFee)
                 const feeOk = Number.isFinite(feeNum) && feeNum >= 0
+                const from = renewFrom || (renewP ? renewP.from : '')
+                const to = from ? computeEndDate(from, row.membership_type) : ''
+                const dateOk = !!from && !!to
                 return (
                   <>
                     <p className="confirm-label">
                       Renew {row.membership_type || 'membership'} for {row.full_name}?{' '}
-                      {renewP ? (
+                      {dateOk ? (
                         <>
-                          New period <b>{formatDate(renewP.from)} → {formatDate(renewP.to)}</b>
-                          {renewP.keeps ? ' (remaining days kept).' : ' (starts from today).'}
+                          New period <b>{formatDate(from)} → {formatDate(to)}</b>
+                          {renewP && from === renewP.from
+                            ? renewP.keeps
+                              ? ' (remaining days kept).'
+                              : ' (starts from today).'
+                            : '.'}
                         </>
                       ) : (
                         'Dates could not be computed for this plan.'
@@ -937,6 +949,15 @@ export default function ApplicationDetail({ row, onClose, refresh, startEditOnOp
                       Records {feeOk ? formatINR(feeNum) : '—'} as renewal fee.
                     </p>
                     <div className="renew-fields">
+                      <div className="renew-field">
+                        <span>Renewal start date *</span>
+                        <input
+                          className="confirm-input"
+                          type="date"
+                          value={renewFrom}
+                          onChange={(e) => setRenewFrom(e.target.value)}
+                        />
+                      </div>
                       <div className="renew-field">
                         <span>Fee (₹)</span>
                         <input
@@ -964,7 +985,7 @@ export default function ApplicationDetail({ row, onClose, refresh, startEditOnOp
                     </div>
                     <div className="confirm-btns">
                       <button className="btn-act" onClick={() => setConfirm(null)}>Cancel</button>
-                      <button className="btn-act approve" onClick={doRenew} disabled={busy === 'renew' || !txnOk || !feeOk}>
+                      <button className="btn-act approve" onClick={doRenew} disabled={busy === 'renew' || !txnOk || !feeOk || !dateOk}>
                         {busy === 'renew' ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />} Renew membership
                       </button>
                     </div>

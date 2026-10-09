@@ -48,6 +48,7 @@ import {
   findLogsByDonorAndWorker,
   findLogsByAssignment,
   getTotalCollectedByWorker,
+  getWorkerCollectionReceipts,
   getCollectedByNgo,
   getTotalCollectedByAssignment,
   getTotalCollectedByDonorAndWorker,
@@ -477,13 +478,13 @@ function realOperatorId(user) {
   return user?.impersonation && user.imposter_id != null ? user.imposter_id : user.id;
 }
 
-async function taggedAssignmentIds(assignmentIds, workerId) {
-  if (!workerId || !Array.isArray(assignmentIds) || assignmentIds.length === 0) return new Set();
+async function taggedAssignmentIds(assignmentIds, operatorId) {
+  if (!operatorId || !Array.isArray(assignmentIds) || assignmentIds.length === 0) return new Set();
   const { data, error } = await db
     .from('fro_donor_logs')
     .select('assignment_id')
     .in('assignment_id', assignmentIds)
-    .eq('fro_worker_id', workerId);
+    .or(`operator_id.eq.${operatorId},fro_worker_id.eq.${operatorId}`);
   if (error) throw error;
   return new Set((data || []).map(l => l.assignment_id));
 }
@@ -1105,7 +1106,14 @@ export const getMyPerformance = async (req, res) => {
     // row one of them last overwrote.
     const { data: liveStatus } = await db
       .from('fro_live_status')
-      .select(FRO_IDLE_LIVE_COLS)
+      // idle_since and today_idle_seconds are NOT in the shared column list, and
+      // this row is the input to isIdleNow() and to the legacy fallback below. With
+      // them missing they simply arrive as undefined: is_idle went false and the
+      // fallback idle silently lost the banked total, which is how this strip ended
+      // up disagreeing with the admin board's IDLE cell for the same person at the
+      // same moment. The admin board selects the same two extras for the same
+      // reason.
+      .select(`${FRO_IDLE_LIVE_COLS}, idle_since, today_idle_seconds`)
       .eq('worker_id', metricsWorkerId)
       .maybeSingle();
 
@@ -1166,6 +1174,10 @@ export const getMyPerformance = async (req, res) => {
       const ts = await computeTimeStatus({ workerId: metricsWorkerId, liveRow: liveStatus || {}, shift: idleShift, nowMs, agentId: agentCtx?.id ?? null });
       if (ts.hasLedger) idleSeconds = ts.totals.idle_seconds;
     } catch (ledgerErr) {
+      // Must stay loud. A silent fallback here once shipped a version where every
+      // FRO's idle read 0 on their own strip while the admin board showed the
+      // truth — the strip and the board were reading the same thing and only one
+      // of them was allowed to fail quietly.
       console.error('performance strip ledger idle read failed:', ledgerErr.message);
     }
 
@@ -1294,8 +1306,10 @@ export const getMyCollections = async (req, res) => {
 
     const creditWorkerName = req.user.impersonation && req.user.imposter_name ? String(req.user.imposter_name).trim() : (worker.name || '').trim();
     const workerName = creditWorkerName;
-    let monthStartDay = monthStart.slice(0, 10);
-    let monthEndDay = monthEnd.slice(0, 10);
+    // Under work-as the rows belong to the FRO being stood in for, so the total
+    // has to resolve against that worker's receipts, not the session holder's.
+    // getDashboard and getMyTarget both pick creditWorkerId this way.
+    const creditWorkerId = req.user.impersonation && req.user.imposter_id ? req.user.imposter_id : workerId;
 
     const monthParam = String(req.query.month || '').trim();
     if (monthParam && monthParam !== 'current') {
@@ -1318,19 +1332,17 @@ export const getMyCollections = async (req, res) => {
       const start = new Date(Date.UTC(y, m, 1, 0, 0, 0, 0));
       const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
       const end = new Date(Date.UTC(y, m, lastDay, 23, 59, 59, 999));
-      monthStartDay = start.toISOString().slice(0, 10);
-      monthEndDay = end.toISOString().slice(0, 10);
       monthStart = start.toISOString();
       monthEnd = end.toISOString();
     }
 
-    const { data: receipts, error } = await db
-      .from('receipts')
-      .select('id, donor_id, amount, project_id, receipt_date, receipt_no, agent_name, payment_id, donor_name, donor_mobile, mode')
-      .ilike('agent_name', workerName)
-      .gte('receipt_date', monthStartDay)
-      .lte('receipt_date', monthEndDay);
-    if (error) throw error;
+    // The same rows the Collected card totals, from the same loader, so the
+    // number on the card is by construction the sum of the rows listed here.
+    // This used to run its own receipts query with a different name match and no
+    // verified-in-month union, so the two disagreed: backdated-but-verified
+    // receipts appeared in the total but not in the list, and a printed name
+    // needing a trim or a case fold matched one and not the other.
+    const receipts = await getWorkerCollectionReceipts(creditWorkerId, monthStart, monthEnd);
 
     const { data: allNgos } = await db.from('ngos').select('id, name');
     const normProj = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
@@ -1359,15 +1371,13 @@ export const getMyCollections = async (req, res) => {
       for (const n of ngoRows || []) ngoMap[n.id] = n.name;
     }
 
-    const seen = new Set();
+    // No dedup here on purpose: getWorkerCollectionReceipts already applied the
+    // one shared rule. Re-applying the old composite key here would drop rows the
+    // card counts, re-opening the very gap this was meant to close.
     const collections = [];
     for (const r of receipts || []) {
       const amount = parseFloat(r.amount || 0);
       if (amount <= 0) continue;
-
-      const dedupKey = `${r.receipt_no || ''}|${r.donor_id || ''}|${amount}|${r.receipt_date || ''}|${r.payment_id || ''}`;
-      if (seen.has(dedupKey)) continue;
-      seen.add(dedupKey);
 
       let tabNgoId = null;
       let tabNgoName = null;
@@ -1407,6 +1417,11 @@ export const getMyCollections = async (req, res) => {
       collections,
       ngos,
       ngoMap,
+      // The sum of exactly the rows above, before the ngo_id filter is applied.
+      // With no filter this is the same number the Collected card shows; with
+      // one it is the whole-month total, so the modal can label the filtered
+      // subtotal without re-deriving it.
+      total: (receipts || []).reduce((sum, r) => sum + parseFloat(r.amount || 0), 0),
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -2099,7 +2114,10 @@ export const claimSuspenseReceipt = async (req, res) => {
       .insert({
         assignment_id: assignmentId,
         donor_id: donorId,
-        fro_worker_id: creditWorkerId,
+        // Both FK columns hold the covered FRO; the operator is recorded in
+        // operator_id, which carries no FK (see createDonorLogHandler).
+        fro_worker_id: workerId,
+        operator_id: creditWorkerId === workerId ? null : creditWorkerId,
         action: 'disposition',
         disposition_detail: 'lead_done',
         amount_collected: receipt.amount,
@@ -2111,7 +2129,7 @@ export const claimSuspenseReceipt = async (req, res) => {
         payment_from: finalFrom,
         pan_number: effectivePan,
         transaction_datetime: finalTxn,
-        created_by: creditWorkerId,
+        created_by: workerId,
       })
       .select()
       .single();
@@ -3384,7 +3402,11 @@ export const createDonorLogHandler = async (req, res) => {
     const logData = {
       assignment_id: assignment.id,
       donor_id: donorId,
-      fro_worker_id: creditWorkerId,
+      // fro_worker_id and created_by are both FK'd to workers(id), so they hold
+      // the covered FRO. The operator goes in operator_id, which has no FK
+      // because an agent's or admin's id does not exist in workers.
+      fro_worker_id: workerId,
+      operator_id: creditWorkerId === workerId ? null : creditWorkerId,
       action,
       notes: notes || null,
       outcome: outcome || null,
@@ -3402,7 +3424,7 @@ export const createDonorLogHandler = async (req, res) => {
         return isNaN(d.getTime()) ? null : d.toISOString();
       })(),
       accounts_status: null,
-      created_by: creditWorkerId,
+      created_by: workerId,
     };
 
     if (action === 'disposition' && disposition_detail === 'lead_done') {
@@ -3450,6 +3472,12 @@ export const createDonorLogHandler = async (req, res) => {
             remark: logData.remark,
             upi_transaction_id: logData.upi_transaction_id,
             transaction_datetime: logData.transaction_datetime,
+            // Re-attribute the refreshed row to whoever is saving now: the dedupe
+            // above can match a row an agent created earlier today, and without
+            // this the FRO's own save would inherit the agent's operator_id.
+            fro_worker_id: logData.fro_worker_id,
+            operator_id: logData.operator_id,
+            created_by: logData.created_by,
             created_at: new Date().toISOString(),
           });
         } else {
@@ -4366,7 +4394,7 @@ export const getMyHistory = async (req, res) => {
       .select('*, fro_assignments!inner(fro_worker_id, donor_id, station, ngo_id, ngos!left(name))')
       .eq('fro_assignments.fro_worker_id', workerId);
     if (req.user.impersonation && req.user.imposter_id != null) {
-      historyQuery = historyQuery.eq('fro_worker_id', realOperatorId(req.user));
+      historyQuery = historyQuery.or(`operator_id.eq.${realOperatorId(req.user)},fro_worker_id.eq.${realOperatorId(req.user)}`);
     }
     const { data: logs, error } = await historyQuery
       .order('created_at', { ascending: false })
@@ -6412,7 +6440,7 @@ export const getMyDisposedLeads = async (req, res) => {
       .select('donor_id, assignment_id, disposition_detail, disposition_category, created_at, fro_assignments!inner(fro_worker_id)')
       .eq('fro_assignments.fro_worker_id', workerId);
     if (req.user.impersonation && req.user.imposter_id != null) {
-      disposedQuery = disposedQuery.eq('fro_worker_id', realOperatorId(req.user));
+      disposedQuery = disposedQuery.or(`operator_id.eq.${realOperatorId(req.user)},fro_worker_id.eq.${realOperatorId(req.user)}`);
     }
     const { data: disposedLogs, error: logErr } = await disposedQuery
       // History is scoped to THIS billing month's work. The daily rollover

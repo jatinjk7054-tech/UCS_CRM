@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { Download, Trophy, TrendingUp, TriangleAlert, Phone, Target, CircleCheck, Megaphone, Zap, Users, Clock, X, Bell } from 'lucide-react';
 import { apiGet, apiPost, apiPut, getFroHourlyPerformance, getFroDailyStats, getStationWiseCollection } from '../api/auth';
@@ -2179,7 +2179,19 @@ export default function Dashboard() {
           // val stays NUMERIC: the column sort compares it with </>, so a
           // formatted string here would sort alphabetically ("10m" < "59m").
           // display renders the cell, and metricCell already prefers it.
-          idle: { key: 'idle', param: 'IDLE', full: 'Idle', val: (p) => p.today_idle_seconds || 0, display: (v) => formatDuration(v), pill: true, color: '#b91c1c', bg: '#fef2f2', narrow: true },
+          // While a FRO is being covered by an agent, the figure here is the AGENT's idle —
+// the person actually at the keyboard — because that is what their own panel
+// shows. The cell stays a bare duration so it reads as a number in the column and
+// not as an aside; who it belongs to is one hover away.
+idle: {
+    key: 'idle', param: 'IDLE', full: 'Idle',
+    val: (p) => p.today_idle_seconds || 0,
+    display: (v) => formatDuration(v),
+    title: (p) => (p?.idle_attributed_to
+      ? `Idle today of ${p.idle_attributed_to}, who is covering this FRO right now`
+      : 'Idle today'),
+    pill: true, color: '#b91c1c', bg: '#fef2f2', narrow: true,
+  },
           nc: { key: 'nc', param: 'NC', full: 'Non-Connected Calls', val: (p) => ncOf(p), pill: true, color: '#dc2626', bg: '#fef2f2', filterType: 'non_connected' },
           conn: { key: 'conn', param: 'CONN', full: 'Connected Calls', val: (p) => p.connected_range || 0, pill: true, color: '#16a34a', bg: '#f0fdf4', narrow: true, filterType: 'connected' },
           ld: { key: 'ld', param: 'LD', full: 'Leads Done', val: (p) => statusesOf(p).lead_done || 0, pill: true, color: '#b45309', bg: '#fff8e7', filterType: 'connected', status: 'lead_done' },
@@ -2262,16 +2274,16 @@ export default function Dashboard() {
               <td key={m.key} style={{ padding: m.narrow ? '5px 0' : '5px 1px', textAlign: 'center', borderLeft: '1px solid #f1f5f9' }}>
                 <span
                   onClick={click}
-                  title={click ? `Click to view ${m.full.toLowerCase()}` : undefined}
+                  title={m.title ? m.title(p) : (click ? `Click to view ${m.full.toLowerCase()}` : undefined)}
                   style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: m.narrow ? 18 : 22, padding: m.narrow ? '1px 3px' : '1px 4px', borderRadius: 5, background: m.bg, color: m.color, fontSize: '0.656rem', fontWeight: 700, cursor: click ? 'pointer' : 'default', whiteSpace: 'nowrap' }}>
-                  {m.display ? m.display(v) : v}
+                  {m.display ? m.display(v, p) : v}
                 </span>
               </td>
             );
           }
           return (
             <td key={m.key} style={{ padding: m.narrow ? '5px 0' : '5px 1px', textAlign: 'center', borderLeft: '1px solid #f1f5f9' }}>
-              <span onClick={click} style={{ fontSize: '0.656rem', fontWeight: 600, color: '#334155', cursor: click ? 'pointer' : 'default' }}>{m.display ? m.display(v) : v}</span>
+              <span onClick={click} style={{ fontSize: '0.656rem', fontWeight: 600, color: '#334155', cursor: click ? 'pointer' : 'default' }}>{m.display ? m.display(v, p) : v}</span>
             </td>
           );
         };

@@ -824,6 +824,7 @@ const festivalBeneficiaryPickedColumnExists = () => festivalColumnExists('benefi
 
 export const saveFestivalSuggestions = async ({
   ngo_id, activity_id, month, year, observance_date, festival, beneficiary = null,
+  location = null,
   sector_name = null, activity_name = null, batch_no = 1, suggestions = [], created_by = null,
 }) => {
   if (!suggestions.length) return [];
@@ -837,6 +838,7 @@ export const saveFestivalSuggestions = async ({
     festival: String(festival || '').trim(),
     beneficiary: beneficiary || null,
     ...(pickedColumn ? { beneficiary_picked: Boolean(beneficiary) } : {}),
+    location: location || null,
     sector_name: sector_name || null,
     activity_name: activity_name || null,
     batch_no,
@@ -865,6 +867,12 @@ export const saveFestivalSuggestions = async ({
      never the beneficiary of a live suggestion set. */
   if (ngo_id !== undefined && ngo_id !== null && ngo_id !== '') {
     await setFestivalSuggestionsBeneficiary({ ngo_id, month, observance_date, festival, beneficiary });
+    // The same re-align for the block's location: it is optional, so only
+    // ever written when the generation actually carried one — a bare run must
+    // not wipe a place the user had already chosen.
+    if (location) {
+      await setFestivalSuggestionsLocation({ ngo_id, month, observance_date, festival, location });
+    }
   }
 
   // Re-read the batch so the caller gets real ids and the user's current ticks.
@@ -888,6 +896,32 @@ export const setFestivalSuggestionsBeneficiary = async ({
   if (pickedColumn) patch.beneficiary_picked = Boolean(beneficiary);
   const { data, error } = await db.from('event_head_festival_suggestions')
     .update(patch)
+    .eq('month', Number(month))
+    .eq('observance_date', observance_date)
+    .eq('festival', String(festival || '').trim())
+    .eq('ngo_id', ngo_id)
+    .select('id');
+  if (error) throw error;
+  return Array.isArray(data) ? data.length : 0;
+};
+
+/* Writes the Location dropdown's chosen spot onto every stored suggestion of
+   one festival (NGO + month + date + festival), exactly like the Beneficiary
+   writer above — the grid, the post-reload fallback and the Excel/PDF export
+   must all show the place that was actually picked, even when the user never
+   regenerates. The value is free text (a known location from the client's
+   per-NGO list, or anything typed under "Other…"); clearing the dropdown
+   stores null. Until migration 177 is applied the column does not exist, so
+   the write degrades to a no-op like the other post-176/177 probes and the
+   field is simply not persisted (apply the migration and restart the server). */
+export const setFestivalSuggestionsLocation = async ({
+  ngo_id, month, observance_date, festival, location = null,
+}) => {
+  if (ngo_id === undefined || ngo_id === null || ngo_id === '') return 0;
+  const locationColumn = await festivalColumnExists('location');
+  if (!locationColumn) return 0;
+  const { data, error } = await db.from('event_head_festival_suggestions')
+    .update({ location: location || null })
     .eq('month', Number(month))
     .eq('observance_date', observance_date)
     .eq('festival', String(festival || '').trim())

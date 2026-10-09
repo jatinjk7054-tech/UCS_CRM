@@ -644,6 +644,9 @@ export const suggestFestivalPrograms = async (payload = {}) => {
       // vocabulary, so the AI is aimed at exactly who was picked. Without it
       // the server falls back to the NGO's own group.
       beneficiary_group: payload.beneficiary_group || null,
+      // The row's Location cell value, so freshly generated ideas keep the
+      // place this festival already had (the server re-aligns the block).
+      location: payload.location || null,
     })
   } catch (err) {
     console.warn('suggestFestivalPrograms: server unavailable:', err?.message || err)
@@ -686,6 +689,23 @@ export const setFestivalSuggestionsBeneficiary = async (payload = {}) => {
     date: payload.date,
     festival: payload.festival,
     beneficiary: payload.beneficiary,
+  })
+  return Array.isArray(res?.suggestions) ? res.suggestions : []
+}
+
+/* Saves the row's Location dropdown choice onto that festival's stored
+   suggestions, so the screen, the value shown after a reload and the Excel/PDF
+   Location column all read the place the user actually picked — even when they
+   never regenerate. Free text is allowed (a known location from the
+   per-NGO list, or anything typed under "Other…"); an empty value clears it. */
+export const setFestivalSuggestionsLocation = async (payload = {}) => {
+  const res = await apiPut('/event-head/planner/festival-suggestions/location', {
+    month: payload.month,
+    year: payload.year,
+    ngo_id: payload.ngo_id,
+    date: payload.date,
+    festival: payload.festival,
+    location: payload.location || null,
   })
   return Array.isArray(res?.suggestions) ? res.suggestions : []
 }

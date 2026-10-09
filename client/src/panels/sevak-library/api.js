@@ -77,9 +77,10 @@ export async function rejectApplication(id, reason) {
   return res.data
 }
 
-export async function renewApplication(id, { fee, transactionId } = {}) {
+export async function renewApplication(id, { fee, transactionId, startDate } = {}) {
   const body = { transactionId: transactionId || '' }
   if (fee != null && fee !== '') body.fee = fee
+  if (startDate) body.startDate = startDate
   const res = await req(`${P}/applications/${id}/renew`, {
     method: 'POST',
     body: JSON.stringify(body),

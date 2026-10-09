@@ -15,7 +15,7 @@ import {
   renewApplication
 } from './api.js'
 import { pdfMemberDoc } from './MembershipFormDoc.jsx'
-import { formatINR, formatDate, formatTime, renewalPreview } from './formUtils.js'
+import { formatINR, formatDate, formatTime, computeEndDate, renewalPreview } from './formUtils.js'
 import { useToast } from './toast.jsx'
 import StatCard from './StatCard.jsx'
 
@@ -92,6 +92,7 @@ export default function Applications({
   const [rejectReason, setRejectReason] = useState('')
   const [renewFee, setRenewFee] = useState('')
   const [renewTxn, setRenewTxn] = useState('')
+  const [renewFrom, setRenewFrom] = useState('')
   const [approveEmail, setApproveEmail] = useState(true)
   const [actionBusy, setActionBusy] = useState('')
   const [bulkConfirm, setBulkConfirm] = useState(false)
@@ -548,9 +549,13 @@ export default function Applications({
       toast('Enter a valid renewal fee.', 'error')
       return
     }
+    if (!renewFrom) {
+      toast('Pick the renewal start date.', 'error')
+      return
+    }
     setActionBusy('renew')
     try {
-      const data = await renewApplication(r.id, { fee: feeNum, transactionId: txn })
+      const data = await renewApplication(r.id, { fee: feeNum, transactionId: txn, startDate: renewFrom })
       toast(data && data.end_date ? `Membership renewed until ${formatDate(data.end_date)}.` : 'Membership renewed.')
       closeMenu()
       if (refresh) refresh()
@@ -693,6 +698,9 @@ export default function Applications({
         const txnOk = !!String(renewTxn || '').trim()
         const feeNum = Number(renewFee)
         const feeOk = Number.isFinite(feeNum) && feeNum >= 0
+        const from = renewFrom || (p ? p.from : '')
+        const to = from ? computeEndDate(from, r.membership_type) : ''
+        const dateOk = !!from && !!to
         return (
           <div className="row-menu row-menu-box" style={menuStyle}>
             <strong>Renew membership?</strong>
@@ -700,8 +708,16 @@ export default function Applications({
             <div className="menu-kv"><span>Plan</span><b>{r.membership_type || '—'}</b></div>
             <div className="menu-kv">
               <span>New period</span>
-              <b>{p ? `${formatDate(p.from)} → ${formatDate(p.to)}` : '—'}</b>
+              <b>{dateOk ? `${formatDate(from)} → ${formatDate(to)}` : '—'}</b>
             </div>
+            <label className="menu-field">
+              Renewal start date *
+              <input
+                type="date"
+                value={renewFrom}
+                onChange={(e) => setRenewFrom(e.target.value)}
+              />
+            </label>
             <label className="menu-field">
               Fee (₹)
               <input
@@ -725,14 +741,16 @@ export default function Applications({
               />
             </label>
             <p className="menu-hint">
-              {p && p.keeps
-                ? 'Remaining days are kept — the plan is added to the current end date.'
-                : 'Membership already expired, so the new period starts from today.'}{' '}
+              {p && from === p.from
+                ? p.keeps
+                  ? 'Remaining days are kept — the plan is added to the current end date.'
+                  : 'Membership already expired, so the new period starts from today.'
+                : 'The plan duration is added to the chosen start date.'}{' '}
               Records {feeOk ? formatINR(feeNum) : '—'} as renewal fee.
             </p>
             <div className="menu-btns">
               <button className="btn-mini" onClick={() => setMenuConfirm(null)} disabled={!!actionBusy}>Cancel</button>
-              <button className="btn-mini approve" onClick={() => doRenew(r)} disabled={!!actionBusy || !txnOk || !feeOk}>
+              <button className="btn-mini approve" onClick={() => doRenew(r)} disabled={!!actionBusy || !txnOk || !feeOk || !dateOk}>
                 {actionBusy === 'renew' ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Renew
               </button>
             </div>
@@ -795,7 +813,7 @@ export default function Applications({
       })
     }
     if (r.status === 'APPROVED') {
-      items.push({ key: 'renew', label: 'Renew membership', icon: <RefreshCw size={14} />, onClick: () => { setRenewFee(r.membership_fee != null ? String(r.membership_fee) : ''); setRenewTxn(''); setMenuConfirm({ type: 'renew', row: r }) } })
+      items.push({ key: 'renew', label: 'Renew membership', icon: <RefreshCw size={14} />, onClick: () => { setRenewFee(r.membership_fee != null ? String(r.membership_fee) : ''); setRenewTxn(''); setRenewFrom((renewalPreview(r) || {}).from || ''); setMenuConfirm({ type: 'renew', row: r }) } })
       items.push({ key: 'resend', label: 'Resend approval email', icon: <Mail size={14} />, onClick: () => doResend(r) })
     }
     if (['SUBMITTED', 'PAYMENT_SUBMITTED', 'VERIFIED'].includes(r.status)) {

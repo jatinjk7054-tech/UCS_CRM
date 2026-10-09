@@ -264,6 +264,9 @@ export default function Dashboard() {
     try {
       const res = await getMyCollections(ngoId, targetMonth)
       if (res?.month) setCollectionsMonthLabel(monthLabelOf(res.month))
+      // Keep the whole response, not just its rows: it carries the server-side
+      // total so the modal can show the subtotal of what it rendered.
+      setCollectionsData(res)
       let collectionsByNgo = res?.collections || { all: [] }
       let ngoMap = res?.ngoMap || {}
       
@@ -304,6 +307,9 @@ export default function Dashboard() {
       console.error('Error:', err.message)
       setCollectionsByNgo({ all: [] })
       setNgoMap({})
+      // Cleared with the rows: a total left over from the previous month would
+      // otherwise be shown next to an empty list.
+      setCollectionsData(null)
     } finally {
       setCollectionsLoading(false)
     }
@@ -413,7 +419,11 @@ return (
             <Icon color="#8b5cf6">
               <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>
             </Icon>
-            <span style={{ fontSize: 11, color: 'var(--ink-soft)', fontWeight: 600, flex: 1, textTransform: 'uppercase', letterSpacing: 0.3 }}>Monthly Target</span>
+            <span style={{ fontSize: 11, color: 'var(--ink-soft)', fontWeight: 600, flex: 1, textTransform: 'uppercase', letterSpacing: 0.3 }}>
+              {/* Same window as the Collected card below, and labelled the same way
+                  so the two are visibly a pair. */}
+              Target{ts.month ? ` · ${monthLabel(ts.month)}` : ''}
+            </span>
             <span style={{ fontSize: 22, fontWeight: 800, color: 'var(--ink)' }}>{currency(target)}</span>
           </div>
           <div style={{ fontSize: 11, color: 'var(--ink-soft)' }}>
@@ -432,7 +442,15 @@ return (
             <Icon color="var(--sage)">
               <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="17" y2="12"/><path d="M17 6v12"/>
             </Icon>
-            <span style={{ fontSize: 11, color: 'var(--ink-soft)', fontWeight: 600, flex: 1, textTransform: 'uppercase', letterSpacing: 0.3 }}>Collected</span>
+            <span style={{ fontSize: 11, color: 'var(--ink-soft)', fontWeight: 600, flex: 1, textTransform: 'uppercase', letterSpacing: 0.3 }}>
+              {/* The figure is scoped to the current calendar month, but on the
+                  1st it resets to near-zero and on the last day it is a whole
+                  month's work -- which reads like a bug unless the month is
+                  stated. Labelled from the server's own `month` value rather than
+                  recomputed here, so the label cannot drift from the window the
+                  total was actually summed over. */}
+              Collected{ts.month ? ` · ${monthLabel(ts.month)}` : ''}
+            </span>
             <span style={{ fontSize: 22, fontWeight: 800, color: 'var(--sage)' }}>{currency(displayCollected)}</span>
           </div>
           <div style={{ height: 4, borderRadius: 2, background: 'var(--md-outline-variant)', overflow: 'hidden', marginBottom: 4 }}>
@@ -901,6 +919,13 @@ return (
                 <div style={{ fontSize: 10, color: 'var(--ink-soft)' }}>
                   {collectionsLoading ? 'Loading…' : `${(collectionsByNgo[selectedCollectionNgo] || []).length} collections`}
                   {collectionsMonthLabel ? ` · ${collectionsMonthLabel}` : ''}
+                  {/* The subtotal of the rows actually shown. Served by the same
+                      loader the Collected card totals, so on the current month
+                      with no NGO filter this must equal the card; if it ever does
+                      not, the number on screen is what was collected. */}
+                  {!collectionsLoading && selectedCollectionNgo === 'all' && collectionsMonth === 'current' && collectionsData?.total != null && (
+                    <span> · {currency(Number(collectionsData.total))} total</span>
+                  )}
                 </div>
                 <button onClick={() => { setShowCollections(false); setSelectedCollectionNgo('all'); setCollectionSearch('') }}
                   style={{ width: 28, height: 28, border: 'none', borderRadius: 6, background: 'var(--bg)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, lineHeight: 1 }}>

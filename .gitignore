@@ -1,4 +1,5 @@
 node_modules/
+whtsapp/server/scripts/output/
 .env
 .env.local
 

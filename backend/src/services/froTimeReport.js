@@ -22,9 +22,10 @@ import {
   IDLE_STATES,
   istDateStr,
 } from '../utils/froTimeState.js';
-import { getSessionsInRange, sessionsForActor } from './froTimeSessions.js';
+import { getSessionsInRange, sessionsForActor, clampIdleToFirstPresence } from './froTimeSessions.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 /** Epoch ms of IST midnight for 'YYYY-MM-DD'. */
 export function istMidnightMs(dateStr) {
@@ -128,9 +129,29 @@ export function enumerateIstDays(fromDate, toDate) {
  */
 export async function getIdleReportForWorker({ workerId, from, to, nowMs = Date.now(), pool, agentId = null } = {}) {
   const { fromMs, toMs } = istDayRangeToMs(from, to);
-  const fetched = await getSessionsInRange(workerId, fromMs, toMs, pool ? { pool } : {});
-  const intervals = sessionsForActor(fetched, agentId);
-  const { dayMap, total } = perDayStateTotals(intervals, { fromMs, toMs, nowMs });
+  const fetched = sessionsForActor(
+    await getSessionsInRange(workerId, fromMs, toMs, pool ? { pool } : {}),
+    agentId
+  );
+  // Clamp day by day, exactly as the day readers do. Without it an interval left
+  // open overnight is clipped into the next day and billed from that day's shift
+  // start — the "logged in late, shown 25 minutes idle" figure — and this page
+  // would go on reporting it after every other screen had been fixed.
+  //
+  // The clamp has to see a single day at a time (it finds that day's first
+  // presence), so the fetched intervals are re-windowed per day rather than
+  // clamped once across the whole range.
+  const clamped = [];
+  for (let dayStart = fromMs; dayStart < toMs; dayStart += DAY_MS) {
+    const dayEnd = Math.min(dayStart + DAY_MS, toMs);
+    const inDay = fetched.filter((s) => {
+      const st = new Date(s.started_at).getTime();
+      const en = s.ended_at ? new Date(s.ended_at).getTime() : Infinity;
+      return st < dayEnd && en > dayStart;
+    });
+    clamped.push(...clampIdleToFirstPresence(inDay, dayStart));
+  }
+  const { dayMap, total } = perDayStateTotals(clamped, { fromMs, toMs, nowMs });
 
   const daily = enumerateIstDays(from, to).map((date) => {
     const perState = dayMap.get(date);

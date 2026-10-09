@@ -42,6 +42,24 @@ test('genuine same-day idle is untouched', () => {
   assert.deepEqual(clampIdleToFirstPresence(sessions, dayStart), sessions);
 });
 
+test('the day reader and the range report agree on a late login', () => {
+  // getIdleReportForWorker clamps per day for exactly this reason: it used to skip
+  // the clamp and kept billing an overnight-open interval from the next day's
+  // shift start, so "My Idle" disagreed with every other screen on a late login.
+  const overnight = {
+    state: 'HIDDEN',
+    started_at: new Date(SHIFT_START - 60 * 60 * 1000).toISOString(),
+    ended_at: null,
+  };
+  const arrived = { state: 'WORKING', started_at: at('10:05'), ended_at: at('11:00') };
+
+  const clamped = clampIdleToFirstPresence([overnight, arrived], dayStart);
+  assert.equal(clamped[0].started_at, at('10:05'), 'idle starts at arrival, not at shift start');
+
+  // And the rule the report relies on: a day with no presence at all is untouched.
+  assert.deepEqual(clampIdleToFirstPresence([overnight], dayStart), [overnight]);
+});
+
 test('a worker who never showed up keeps no invented presence', () => {
   // One overnight interval and nothing else: there is no first presence to clamp
   // to, so the row must be returned as-is rather than snapped to the day start.

@@ -146,12 +146,18 @@ function LoginWrapper() {
 class ErrorBoundary extends Component {
   state = { hasError: false, error: null }
   static getDerivedStateFromError(error) { return { hasError: true, error } }
+  componentDidCatch(error, info) {
+    console.error('[ErrorBoundary]', error, info && info.componentStack)
+  }
   render() {
     if (this.state.hasError) {
       return (
         <div style={{ padding: 40, textAlign: 'center', fontFamily: 'sans-serif' }}>
           <h2>Something went wrong</h2>
           <p style={{ color: '#666', marginBottom: 16 }}>{this.state.error?.message}</p>
+          <pre style={{ textAlign: 'left', overflow: 'auto', maxHeight: 260, background: '#f6f7fb', border: '1px solid #e3e6ef', borderRadius: 8, padding: 10, margin: '0 auto 16px', fontSize: 12, color: '#333' }}>
+            {this.state.error?.stack}
+          </pre>
           <button onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload() }}
             style={{ padding: '8px 20px', cursor: 'pointer' }}>
             Reload Page

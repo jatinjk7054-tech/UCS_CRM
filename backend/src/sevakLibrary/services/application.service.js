@@ -200,15 +200,27 @@ const addPlanDuration = (isoDate, plan) => {
   return toISODate(d)
 }
 
+// Renewal start date is editable. Accepts an ISO YYYY-MM-DD from the client and
+// validates it; returns null when the value is blank/invalid so callers can
+// fall back to the auto-computed base.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const parseISODate = (value) => {
+  const s = String(value ?? '').trim()
+  if (!ISO_DATE.test(s)) return null
+  const d = new Date(`${s}T00:00:00`)
+  return Number.isNaN(d.getTime()) ? null : s
+}
+
 // True renewal: extends the SAME row (keeps membership_id) instead of issuing a
-// second membership for the same person. Base = whichever is later — the
-// current end date (early renewal keeps the remaining days; renewing 9 Sep on a
-// 7 Sep–7 Oct Monthly membership ends 7 Nov, not 9 Oct) or today (renewing
-// after expiry starts the new period from today). Also records the fee as
-// renewal revenue, appends the fee + UTR to renewal_payments history, and
-// re-arms both reminder emails (advance expiry + post-expiry) for the new end
-// date. The UTR of the original application payment is never touched.
-export async function renewApplication(id, { fee, transactionId } = {}) {
+// second membership for the same person. Base = the operator-chosen renewal
+// start date when supplied, else whichever is later — the current end date
+// (early renewal keeps the remaining days; renewing 9 Sep on a 7 Sep–7 Oct
+// Monthly membership ends 7 Nov, not 9 Oct) or today (renewing after expiry
+// starts the new period from today). Also records the fee as renewal revenue,
+// appends the fee + UTR to renewal_payments history, and re-arms both reminder
+// emails (advance expiry + post-expiry) for the new end date. The UTR of the
+// original application payment is never touched.
+export async function renewApplication(id, { fee, transactionId, startDate } = {}) {
   const row = await getApplicationById(id)
   if (row.status !== 'APPROVED') throw new AppError('Only approved memberships can be renewed', 400)
   if (!row.membership_type) throw new AppError('This application has no membership plan', 400)
@@ -220,7 +232,15 @@ export async function renewApplication(id, { fee, transactionId } = {}) {
   if (txn.length > 64) throw new AppError('Transaction / UTR id must be 64 characters or fewer', 400)
 
   const today = new Date().toISOString().slice(0, 10)
-  const base = row.end_date && row.end_date >= today ? row.end_date : today
+  const providedStart = String(startDate ?? '').trim()
+  if (providedStart && !parseISODate(providedStart)) {
+    throw new AppError('Renewal start date must be a valid date (YYYY-MM-DD)', 400)
+  }
+  const base = providedStart
+    ? parseISODate(providedStart)
+    : row.end_date && row.end_date >= today
+      ? row.end_date
+      : today
   const newEnd = addPlanDuration(base, row.membership_type)
   if (!newEnd) throw new AppError(`Cannot compute renewal dates for plan "${row.membership_type}"`, 400)
 
@@ -233,7 +253,7 @@ export async function renewApplication(id, { fee, transactionId } = {}) {
       end_date: newEnd,
       renewal_count: (Number(row.renewal_count) || 0) + 1,
       renewal_fees: (Number(row.renewal_fees) || 0) + amount,
-      renewal_payments: [...history, { date: today, amount, txn, end_date: newEnd }],
+      renewal_payments: [...history, { date: today, amount, txn, start_date: base, end_date: newEnd }],
       last_renewed_at: today,
       renewal_email_sent: false,
       renewal_soon_sent: false,

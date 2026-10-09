@@ -90,8 +90,17 @@ const issueAgentSession = async (agent, req, res) => {
 
   // Start from a clean cover. A previous shift on the same machine that ended in
   // a crash rather than a logout would otherwise leave a live session behind.
+  //
+  // Those stale covers end HERE, so the FROs they were holding have to be parked
+  // exactly as they are on an explicit release — otherwise their rows keep an open
+  // interval and a lapsed deadline that starts billing idle the moment this agent
+  // stops covering them. Read the targets before releasing.
   await clearOperatorCoverLabels(agentId);
+  const staleTargets = await getActiveSessionTargets(agentId).catch(() => []);
   await releaseOperatorSessions(agentId);
+  for (const targetId of staleTargets) {
+    await parkIdleState(targetId, { reason: 'cover_end', rearmGrace: true }).catch(() => {});
+  }
 
   // Claim the FRO's stations so the cover relationship exists in
   // work_as_sessions. That row is what freezes the FRO's idle while they are

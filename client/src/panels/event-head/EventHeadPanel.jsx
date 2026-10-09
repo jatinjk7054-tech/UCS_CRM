@@ -10,6 +10,7 @@ import EventDashboard from './pages/EventDashboard'
 import CreateEvent from './pages/CreateEvent'
 import MonthlyPlanner from './pages/MonthlyPlanner'
 import ActivityPlanner from './pages/ActivityPlanner'
+import ReelsChecklist from './components/ReelsChecklist'
 import AssetRegister from './pages/AssetRegister'
 import MaterialRegister from './pages/MaterialRegister'
 import BeneficiaryDistribution from './pages/BeneficiaryDistribution'
@@ -42,6 +43,7 @@ const NAV = [
      route (`/event-head/planner`) so that only one of the two links is ever
      highlighted as active — sharing one path would light up both at once. */
   { id:'planner',         path:'/event-head/planner',           label:'Monthly Planner',       icon:Plane, section:'Programs' },
+  { id:'reels-checklist', path:'/event-head/reels-checklist',   label:'Reels Checklist',       icon:Eye, section:'Programs' },
   { id:'ngos',           path:'/event-head/ngos',             label:'NGOs',                  icon:Brief, section:'Programs' },
   { id:'sectors',        path:'/event-head/sectors',          label:'Sectors',               icon:Grid, section:'Programs' },
   { id:'activities',     path:'/event-head/activities',       label:'Activities',            icon:Star, section:'Programs' },
@@ -350,6 +352,7 @@ export default function EventHeadPanel() {
                   highlighted as active, and so the Calendar grid above stays
                   exactly as it is. */}
               <Route path="planner" element={<ActivityPlanner />} />
+              <Route path="reels-checklist" element={<ReelsChecklist />} />
             <Route path="create" element={<CreateEvent />} />
             <Route path="ngos" element={<NGOs />} />
             <Route path="sectors" element={<Sectors />} />

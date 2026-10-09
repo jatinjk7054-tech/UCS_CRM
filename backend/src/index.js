@@ -120,6 +120,7 @@ import { ensureDocumentsSchema } from './bootstrap/ensureDocumentsSchema.js';
 import { ensureLeadsRecruiterFkSchema } from './bootstrap/ensureLeadsRecruiterFkSchema.js';
 import { ensureSevakRenewalSchema } from './bootstrap/ensureSevakRenewalSchema.js';
 import { ensureStationAgentOfRecordSchema } from './bootstrap/ensureStationAgentOfRecordSchema.js';
+import { ensureFroDonorLogOperatorSchema } from './bootstrap/ensureFroDonorLogOperatorSchema.js';
 import { ensureSevakSignatureSchema } from './bootstrap/ensureSevakSignatureSchema.js';
 import { aiSuggestionsStartupReport } from './utils/aiSuggestions.js';
 
@@ -1198,6 +1199,7 @@ await ensureFroTimeSessionsAgentSchema().catch(e => console.error('ensureFroTime
     await ensureSevakRenewalSchema().catch(e => console.error('ensureSevakRenewalSchema failed:', e?.message || e));
     await ensureSevakSignatureSchema().catch(e => console.error('ensureSevakSignatureSchema failed:', e?.message || e));
     await ensureStationAgentOfRecordSchema().catch(e => console.error('ensureStationAgentOfRecordSchema failed:', e?.message || e));
+    await ensureFroDonorLogOperatorSchema().catch(e => console.error('ensureFroDonorLogOperatorSchema failed:', e?.message || e));
     import('./services/notificationScheduler.js');
     import('./services/froAutoLogoutScheduler.js');
     import('./services/dbHealthWatchdog.js');

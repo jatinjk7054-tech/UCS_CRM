@@ -3,7 +3,7 @@ import { getAllUsers, getUsersCountByRole } from '../models/userModel.js';
 import { getAllHRs } from '../models/hrModel.js';
 import { getAllWorkers, getWorkerById } from '../models/workerModel.js';
 import { getDashboardStats } from '../models/froAssignmentModel.js';
-import { getTotalCollectedByWorker } from '../models/froDonorLogModel.js';
+import { getTotalCollectedByWorker, getWorkerCollectionReceipts } from '../models/froDonorLogModel.js';
 import db from '../config/db.js';
 import { FRO_IDLE_LIVE_COLS } from '../utils/froIdleCols.js';
 import { dayTotalsForWorkers } from '../services/froTimeSessions.js';
@@ -413,21 +413,15 @@ export const getSuperAdminDashboard = async (req, res) => {
       );
       const froNames = froWorkersOnly.filter(w => w.name).map(w => ({ id: w.id, name: w.name.trim() }));
       const froTotals = {};
+      // One shared loader instead of a per-FRO `ilike` over the whole receipts
+      // table. It attributed by name only, so a receipt stamped with a CRM agent
+      // label ("Agent 13") or a printed-name variant was credited to nobody, and
+      // ilike treated `_`/`%` in a name as wildcards. All-time window: this tile
+      // is explicitly all-time, unlike the per-month card.
       for (const w of froNames) {
-        const { data: receipts } = await db
-          .from('receipts')
-          .select('id, amount, receipt_no, donor_id, receipt_date, payment_id')
-          .ilike('agent_name', w.name);
-        if (!receipts || receipts.length === 0) continue;
-        const seen = new Set();
-        for (const r of receipts) {
-          const amount = parseFloat(r.amount || 0);
-          if (amount <= 0) continue;
-          const dedupKey = `${r.receipt_no || ''}|${r.donor_id || ''}|${amount}|${r.receipt_date || ''}|${r.payment_id || ''}`;
-          if (seen.has(dedupKey)) continue;
-          seen.add(dedupKey);
-          froTotals[w.id] = (froTotals[w.id] || 0) + amount;
-        }
+        const receipts = await getWorkerCollectionReceipts(w.id, '1970-01-01T00:00:00.000Z', '2099-12-31T23:59:59.999Z');
+        const total = receipts.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0);
+        if (total > 0) froTotals[w.id] = total;
       }
       topFros = froWorkersOnly
         .map(w => ({ id: w.id, name: w.name, totalCollection: froTotals[w.id] || 0 }))

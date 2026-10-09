@@ -352,4 +352,66 @@ export async function dayTotalsForWorkers(workerIds, { shiftFor = () => null, no
   return out;
 }
 
+/** Map key for a (covered worker, agent) pair. Both halves matter — see below. */
+export const agentTotalKey = (workerId, agentId) => `${String(workerId)}::${String(agentId)}`;
+
+/**
+ * Today's idle totals for the person at the keyboard on a covered FRO, keyed by
+ * (coveredWorkerId, agentId). One query for every live cover on a board.
+ *
+ * An agent has no row in `workers` — that is why their time is stamped on the
+ * covered FRO's intervals in the first place — so this is the only way to ask the
+ * ledger "how much idle has the person actually running this queue run up today".
+ * The admin board needs it to show, on a covered FRO's row, the figure belonging
+ * to whoever is really working it, which is what that FRO's own strip shows them.
+ *
+ * Keyed by BOTH halves, not by agent alone, and it matters:
+ *
+ *   - By worker, because the strip reads the agent's rows filtered to the FRO being
+ *     worked. One agent covering two FROs has rows against both; summing by agent
+ *     would print their combined total on each of the two rows, so each row would
+ *     read higher than the panel in front of them.
+ *   - By shift, because the strip clamps that FRO's shift window. With no shift
+ *     passed in, idle running past shift end would be counted on the board and
+ *     clipped on the strip — the board would quietly disagree by exactly those
+ *     minutes, which is the very symptom this reader exists to remove.
+ */
+export async function dayTotalsForAgents(pairs, { shiftFor = () => null, nowMs = Date.now(), pool = db._pool } = {}) {
+  const wanted = [...new Map(
+    (pairs || [])
+      .filter((p) => p && p.workerId != null && p.agentId != null)
+      .map((p) => [agentTotalKey(p.workerId, p.agentId), p])
+  ).values()];
+  const out = new Map();
+  if (wanted.length === 0) return out;
+  const workerIds = wanted.map((p) => String(p.workerId));
+  const agentIds = wanted.map((p) => String(p.agentId));
+  const day = istDayBoundsMs(nowMs);
+  const { rows } = await pool.query(
+    `SELECT worker_id, agent_id, state, started_at, ended_at
+       FROM fro_time_sessions
+      WHERE (worker_id::text, agent_id) IN (SELECT * FROM unnest($1::text[], $2::text[]))
+        AND started_at < $4
+        AND COALESCE(ended_at, 'infinity'::timestamptz) > $3
+      ORDER BY started_at ASC`,
+    [workerIds, agentIds, toIso(day.startMs), toIso(day.endMs)]
+  );
+  const byPair = new Map();
+  for (const r of rows) {
+    const k = agentTotalKey(r.worker_id, r.agent_id);
+    if (!byPair.has(k)) byPair.set(k, []);
+    byPair.get(k).push(r);
+  }
+  for (const p of wanted) {
+    const k = agentTotalKey(p.workerId, p.agentId);
+    const sessions = byPair.get(k) || [];
+    // The same first-presence clamp the worker readers use: an interval left open
+    // overnight must not bill an agent for hours before they started.
+    const clamped = clampIdleToFirstPresence(sessions, day.startMs);
+    // Same shift window the strip applies, so the two cannot drift apart.
+    out.set(k, sumIntervalsByState(clamped, { shift: shiftFor(p.workerId), nowMs, dayBounds: day }).idle_seconds);
+  }
+  return out;
+}
+
 export const __internal = { durationSecondsBetween };

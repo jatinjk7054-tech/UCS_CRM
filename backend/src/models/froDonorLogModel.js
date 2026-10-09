@@ -1,5 +1,13 @@
 import db, { sql } from '../config/db.js';
 import { maybeRefreshSpecialIncentives } from '../services/specialIncentiveService.js';
+import {
+  CATEGORY_LABELS,
+  buildAgentNameMatches,
+  escapeLikePattern,
+  isCategoryLabel,
+  mergeAttributedReceipts,
+  paymentIdentity,
+} from '../services/froCollectionMatch.js';
 
 // Keep the id sequence ahead of the highest existing id before inserting, so a
 // default-sequence insert never collides with a row that was written earlier
@@ -32,15 +40,21 @@ export const createDonorLog = async (data) => {
   return result;
 };
 
-// Find a same-day disposition log for the same assignment + worker + detail so
+// Find a same-day disposition log for the same assignment + actor + detail so
 // repeat saves (e.g. re-dialing a ringing/busy donor) refresh the existing row
 // instead of piling up identical timeline entries.
-export const findDispositionLogToday = async (assignmentId, workerId, detail, dayStart) => {
+//
+// The actor is matched against operator_id OR fro_worker_id because those columns
+// split by session type: a self-service save records the worker in
+// fro_worker_id, while a work-as save records the covered FRO there and the
+// operator in operator_id. fro_worker_id is foreign-keyed to workers, so it can
+// never hold an agent's or an admin's id.
+export const findDispositionLogToday = async (assignmentId, actorId, detail, dayStart) => {
   const { data, error } = await db
     .from('fro_donor_logs')
     .select('id')
     .eq('assignment_id', assignmentId)
-    .eq('fro_worker_id', workerId)
+    .or(`fro_worker_id.eq.${actorId},operator_id.eq.${actorId}`)
     .eq('action', 'disposition')
     .eq('disposition_detail', detail)
     .gte('created_at', dayStart)
@@ -112,37 +126,17 @@ export function paymentDiscriminant(d) {
   return 'X';
 }
 
+// The per-NGO chips rendered directly beneath the Collected card.
+//
+// It deliberately reuses getWorkerCollectionReceipts rather than running its own
+// query. It used to match with `lower(btrim(agent_name)) = $3` while the card's
+// headline matched with `ilike` on the same rows, so the chips did not add up to
+// the number above them whenever a name needed a trim or a case fold. Both now
+// read one deduplicated row set, so the chips summing to the card is structural
+// rather than a coincidence.
 export const getCollectedByNgo = async (workerId, monthStart, monthEnd, allowedNgoIds) => {
-  const { data: worker } = await db.from('workers').select('name').eq('id', workerId).maybeSingle();
-  if (!worker?.name) return {};
-  const workerName = worker.name.trim();
-
-const monthStartDay = String(monthStart).slice(0, 10);
-  const monthEndDay = String(monthEnd).slice(0, 10);
-  const { data: receipts, error } = await sql(
-    `SELECT id, donor_id, amount, project_id, receipt_date, receipt_no, payment_id, agent_name, log_id
-     FROM receipts
-     WHERE receipt_date >= $1 AND receipt_date <= $2
-       AND lower(btrim(agent_name)) = $3`,
-    [monthStartDay, monthEndDay, workerName.toLowerCase()]
-  ).then(r => ({ data: r, error: null })).catch(e => ({ data: null, error: e }));
-  if (error) throw error;
-  // Verified this month but receipt backdated (receipt_date = transaction date,
-  // verified_at = now): include via linked log so Verified ⊆ Collected.
-  let verifiedReceipts = [];
-  try {
-    verifiedReceipts = await sql(
-      `SELECT r.id, r.donor_id, r.amount, r.project_id, r.receipt_date, r.receipt_no, r.payment_id, r.agent_name, r.log_id
-       FROM receipts r
-       JOIN fro_donor_logs l ON l.id = r.log_id
-       WHERE l.fro_worker_id = $1 AND l.accounts_status = 'verified'
-         AND l.verified_at >= $2 AND l.verified_at <= $3`,
-      [workerId, monthStart, monthEnd]
-    );
-  } catch (e) { verifiedReceipts = []; }
-  for (const r of verifiedReceipts || []) {
-    if (!(receipts || []).some(x => String(x.id) === String(r.id))) receipts.push(r);
-  }
+  const receipts = await getWorkerCollectionReceipts(workerId, monthStart, monthEnd);
+  if (receipts.length === 0) return {};
 
   const { data: ngos } = await db.from('ngos').select('id, name');
   const projToNgoId = {};
@@ -156,13 +150,9 @@ const monthStartDay = String(monthStart).slice(0, 10);
   }
 
   const byNgo = {};
-  const seen = new Set();
-  for (const r of receipts || []) {
+  for (const r of receipts) {
     const amount = parseFloat(r.amount || 0);
     if (amount <= 0) continue;
-    const dedupKey = `${r.receipt_no || ''}|${r.donor_id || ''}|${amount}|${r.receipt_date || ''}|${r.payment_id || ''}`;
-    if (seen.has(dedupKey)) continue;
-    seen.add(dedupKey);
     const projectNorm = norm(r.project_id);
     const ngoId = projToNgoId[projectNorm] || r.project_id || 'others';
     const key = (allowedNgoIds && allowedNgoIds.length > 0 && allowedNgoIds.includes(ngoId)) ? ngoId : (ngoId || 'others');
@@ -171,91 +161,207 @@ const monthStartDay = String(monthStart).slice(0, 10);
   return byNgo;
 };
 
-export const getTotalCollectedByWorker = async (workerId, monthStart, monthEnd) => {
-  const { data: worker } = await db.from('workers').select('name').eq('id', workerId).maybeSingle();
-  if (!worker?.name) return 0;
-  const workerName = worker.name.trim();
-
-  const monthStartDay = String(monthStart).slice(0, 10);
-  const monthEndDay = String(monthEnd).slice(0, 10);
-  const { data: receipts, error } = await db
-    .from('receipts')
-    .select('id, donor_id, amount, receipt_date, receipt_no, payment_id, agent_name, log_id')
-    .ilike('agent_name', workerName)
-    .gte('receipt_date', monthStartDay)
-    .lte('receipt_date', monthEndDay);
-  if (error) throw error;
-
-  // Include receipts verified in this window even when receipt_date (transaction
-  // date) falls in an earlier month. Verified card counts by verified_at, so
-  // without this Verified amount never lands in Collected. Attributed by the
-  // linked log's fro_worker_id (authoritative) instead of agent_name text.
-  let verifiedReceipts = [];
+// Curated spelling variants for this worker, from the worker_aliases table
+// (migration 080). Imported receipts carry printed-name variants that never
+// matched the canonical name, so those donations were silently never credited.
+// Returns [] rather than throwing: an alias lookup failure must not take the
+// collection total down with it.
+const getWorkerAliasNames = async (workerId) => {
   try {
-    verifiedReceipts = await sql(
-      `SELECT r.id, r.donor_id, r.amount, r.receipt_date, r.receipt_no, r.payment_id, r.agent_name, r.log_id
-       FROM receipts r
-       JOIN fro_donor_logs l ON l.id = r.log_id
-       WHERE l.fro_worker_id = $1 AND l.accounts_status = 'verified'
-         AND l.verified_at >= $2 AND l.verified_at <= $3`,
-      [workerId, monthStart, monthEnd]
-    );
-  } catch (e) { verifiedReceipts = []; }
-  const merged = [...(receipts || [])];
-  const ids = new Set(merged.map(r => String(r.id)));
-  for (const r of verifiedReceipts || []) {
-    if (!ids.has(String(r.id))) { merged.push(r); ids.add(String(r.id)); }
+    const { data } = await db
+      .from('worker_aliases')
+      .select('alias_name')
+      .eq('worker_id', workerId);
+    return (data || []).map((a) => a.alias_name).filter(Boolean);
+  } catch (e) {
+    return [];
   }
-
-  const seen = new Set();
-  let total = 0;
-  for (const r of merged) {
-    const amount = parseFloat(r.amount || 0);
-    if (amount <= 0) continue;
-    const dedupKey = `${r.receipt_no || ''}|${r.donor_id || ''}|${amount}|${r.receipt_date || ''}|${r.payment_id || ''}`;
-    if (seen.has(dedupKey)) continue;
-    seen.add(dedupKey);
-    total += amount;
-  }
-  return total;
 };
 
-export const getDailyCollectionByWorker = async (workerId, monthStart, monthEnd) => {
-  const { data: worker } = await db.from('workers').select('name').eq('id', workerId).maybeSingle();
-  if (!worker?.name) return {};
-  const workerName = worker.name.trim();
+// Which real worker each printed agent_name belongs to, for the whole FRO
+// population rather than one person.
+//
+// Needed because the log fallback must be able to ask "does this receipt's
+// agent_name already name somebody?" before claiming it. Without that question
+// the fallback stayed additive: a receipt stamped 'Mamta Shah' but linked to
+// another FRO's station log was counted on both cards, which is how one FRO's
+// total read ~10,284 against a real 7,433.
+//
+// Every FRO row is included, so the answer is "yes, it names a real person, not
+// you" for any colleague. Category labels and blanks are absent by
+// construction: they are not workers.
+const getAllWorkerNameResolvers = async () => {
+  const resolvers = new Set();
+  try {
+    const { data: workers } = await db
+      .from('workers')
+      .select('name')
+      .not('name', 'is', null);
+    for (const w of workers || []) {
+      const n = String(w.name || '').trim().toLowerCase();
+      if (n && !isCategoryLabel(n)) resolvers.add(n);
+    }
+  } catch (e) {
+    // Fail open: with no resolver set, the fallback behaves as it did before,
+    // which risks a duplicate credit but never hides a collection.
+    return new Set();
+  }
+  try {
+    const { data: aliases } = await db
+      .from('worker_aliases')
+      .select('alias_name')
+      .not('alias_name', 'is', null);
+    for (const a of aliases || []) {
+      const n = String(a.alias_name || '').trim().toLowerCase();
+      if (n && !isCategoryLabel(n)) resolvers.add(n);
+    }
+  } catch (e) { /* canonical names alone are enough to spot a competing claim */ }
+  return resolvers;
+};
 
+/**
+ * Every receipt that counts as this worker's collection in the window, already
+ * deduplicated. This is the ONE loader behind both the dashboard's "Collected"
+ * card and the "View collections" list.
+ *
+ * Attribution is NAME first, log_id only as a fallback -- deliberately reversed
+ * from an earlier version of this file, which trusted the log and credited one
+ * FRO with another FRO's collection.
+ *
+ * receipts.log_id is a reliable LINK but not a reliable OWNER. When an operator
+ * matches a bank entry to a donor's pending lead (bankAuditController.js:181),
+ * the receipt inherits that lead's log, and log.fro_worker_id is whoever the
+ * ASSIGNMENT belongs to -- not who collected the cash. A donor on a station
+ * produces a receipt whose agent_name is the real collector while the log points
+ * at the station's FRO.
+ *
+ * So agent_name wins whenever it resolves to a real person: on the bank-audit and
+ * suspense paths that is the name the operator saw and confirmed in the Edit
+ * Receipt form. The log is used only when the name is blank or is a category
+ * label, where there is no name evidence at all.
+ *
+ * agent_name still cannot be trusted blindly -- a CRM agent's work-as switch
+ * stamps the label "Agent 13" rather than a name (authController.js:960), and the
+ * bank-audit and suspense paths write 'Suspense'/'PG'/free text -- so the name
+ * query is alias-expanded (migration 080) and category labels are excluded
+ * outright, leaving unreconciled bank money credited to nobody.
+ *
+ * Category labels ('Suspense', 'PG', 'Library', 'NA') are never matched, so
+ * unreconciled bank money is not credited to an FRO who never collected it.
+ */
+export const getWorkerCollectionReceipts = async (workerId, monthStart, monthEnd) => {
   const monthStartDay = String(monthStart).slice(0, 10);
   const monthEndDay = String(monthEnd).slice(0, 10);
-  const { data: receipts, error } = await db
-    .from('receipts')
-    .select('id, donor_id, amount, receipt_date, receipt_no, payment_id, agent_name, log_id')
-    .ilike('agent_name', workerName)
-    .gte('receipt_date', monthStartDay)
-    .lte('receipt_date', monthEndDay);
-  if (error) throw error;
+  const RECEIPT_COLS = 'id, donor_id, amount, project_id, receipt_date, receipt_no, payment_id, agent_name, log_id, donor_name, donor_mobile, mode';
 
-  // Same verified-in-month union as getTotalCollectedByWorker, bucketed by the
-  // verification day so daily AKI days line up with the Verified Today card.
-  let verifiedRows = [];
+  // Window 1 - authoritative. The log states the owner, so this needs no name at
+  // all and is immune to a mislabelled agent_name. Only consulted for receipts
+  // whose name gave us nothing (blank, or a category label like 'Suspense'),
+  // so it can never override a name an operator actually confirmed.
+  let byLogId = [];
   try {
-    verifiedRows = await sql(
+    byLogId = await sql(
+      `SELECT r.id, r.donor_id, r.amount, r.project_id, r.receipt_date, r.receipt_no, r.payment_id, r.agent_name, r.log_id, r.donor_name, r.donor_mobile, r.mode
+       FROM receipts r
+       JOIN fro_donor_logs l ON l.id = r.log_id
+       WHERE l.fro_worker_id = $1
+         AND r.receipt_date >= $2 AND r.receipt_date <= $3`,
+      [workerId, monthStartDay, monthEndDay]
+    );
+  } catch (e) { byLogId = []; }
+
+  // Window 2 - primary. Receipts whose printed agent_name names this worker (or
+  // one of their curated aliases), matched exactly with LIKE wildcards escaped.
+  // Category labels are excluded so 'Suspense' bank money is never credited to a
+  // person.
+  const { data: worker } = await db.from('workers').select('name').eq('id', workerId).maybeSingle();
+  let byName = [];
+  if (worker?.name) {
+    const aliasNames = await getWorkerAliasNames(workerId);
+    const matches = buildAgentNameMatches(worker.name, aliasNames);
+    const patterns = [...matches]
+      .filter((n) => !CATEGORY_LABELS.includes(n))
+      .map((n) => escapeLikePattern(n));
+    if (patterns.length > 0) {
+      const orClause = patterns.map((_, i) => `lower(btrim(agent_name)) = $${i + 4}`).join(' OR ');
+      try {
+        byName = await sql(
+          `SELECT ${RECEIPT_COLS}
+           FROM receipts r
+           WHERE r.receipt_date >= $1 AND r.receipt_date <= $2
+             AND (${orClause})`,
+          [monthStartDay, monthEndDay, ...patterns]
+        );
+      } catch (e) { byName = []; }
+    }
+  }
+
+  return mergeAttributedReceipts(byName, byLogId, await getAllWorkerNameResolvers());
+};
+
+export const getTotalCollectedByWorker = async (workerId, monthStart, monthEnd) => {
+  const receipts = await getWorkerCollectionReceipts(workerId, monthStart, monthEnd);
+  return receipts.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+};
+
+// Same attribution as getWorkerCollectionReceipts -- name first, log as a
+// fallback -- so the daily AKI chart and the Collected card can never disagree
+// about who collected what. It cannot simply reuse that loader because the two
+// bucket by different dates: the card counts a collection in the transaction
+// month, while this has historically credited a backdated receipt to the day it
+// was VERIFIED, so the daily AKI days line up with the Verified Today card.
+// That day choice is the only difference; ownership comes from the shared
+// helpers so it cannot drift.
+export const getDailyCollectionByWorker = async (workerId, monthStart, monthEnd) => {
+  const monthStartDay = String(monthStart).slice(0, 10);
+  const monthEndDay = String(monthEnd).slice(0, 10);
+
+  // Authoritative window: linked to this worker's log, in the verified window so
+  // the bucket day can be the verification date. Fallback only, for receipts whose
+  // name resolved to nobody.
+  let byLogId = [];
+  try {
+    byLogId = await sql(
       `SELECT r.id, r.donor_id, r.amount, r.receipt_date, r.receipt_no, r.payment_id, r.agent_name, r.log_id,
               l.verified_at AS verified_at
        FROM receipts r
        JOIN fro_donor_logs l ON l.id = r.log_id
-       WHERE l.fro_worker_id = $1 AND l.accounts_status = 'verified'
+       WHERE l.fro_worker_id = $1
          AND l.verified_at >= $2 AND l.verified_at <= $3`,
       [workerId, monthStart, monthEnd]
     );
-  } catch (e) { verifiedRows = []; }
-  const mergedById = new Map();
-  for (const r of receipts || []) mergedById.set(String(r.id), { ...r, verified_at: null });
-  // Verified-day version wins when the same receipt appears in both queries.
-  for (const r of verifiedRows || []) mergedById.set(String(r.id), r);
-  const merged = [...mergedById.values()];
+  } catch (e) { byLogId = []; }
 
-  const seen = new Set();
+  const { data: worker } = await db.from('workers').select('name').eq('id', workerId).maybeSingle();
+  let byName = [];
+  if (worker?.name) {
+    const aliasNames = await getWorkerAliasNames(workerId);
+    const patterns = [...buildAgentNameMatches(worker.name, aliasNames)]
+      .filter((n) => !CATEGORY_LABELS.includes(n))
+      .map((n) => escapeLikePattern(n));
+    if (patterns.length > 0) {
+      const orClause = patterns.map((_, i) => `lower(btrim(agent_name)) = $${i + 3}`).join(' OR ');
+      try {
+        byName = await sql(
+          `SELECT id, donor_id, amount, receipt_date, receipt_no, payment_id, agent_name, log_id
+           FROM receipts
+           WHERE receipt_date >= $1 AND receipt_date <= $2
+             AND (${orClause})`,
+          [monthStartDay, monthEndDay, ...patterns]
+        );
+      } catch (e) { byName = []; }
+    }
+  }
+
+  // Every receipt credited here is in the window by whichever date applies, and
+  // deduplicated once across both windows before bucketing.
+  const merged = mergeAttributedReceipts(
+    byName.map((r) => ({ ...r, verified_at: null })),
+    byLogId.map((r) => ({ ...r, verified_at: r.verified_at || null })),
+    await getAllWorkerNameResolvers(),
+  );
+
+  const seenPayments = new Set();
   const byDay = {};
   for (const r of merged) {
     const amount = parseFloat(r.amount || 0);
@@ -264,9 +370,9 @@ export const getDailyCollectionByWorker = async (workerId, monthStart, monthEnd)
     const rDay = r.receipt_date ? String(r.receipt_date).slice(0, 10) : null;
     const day = (vDay && vDay >= monthStartDay && vDay <= monthEndDay) ? vDay : rDay;
     if (!day) continue;
-    const dedupKey = `${r.receipt_no || ''}|${r.donor_id || ''}|${amount}|${day}|${r.payment_id || ''}`;
-    if (seen.has(dedupKey)) continue;
-    seen.add(dedupKey);
+    const identity = paymentIdentity(r);
+    if (seenPayments.has(identity)) continue;
+    seenPayments.add(identity);
     byDay[day] = (byDay[day] || 0) + amount;
   }
   return byDay;
@@ -430,6 +536,27 @@ export const getRangeCollectionByWorker = async (workerIds, startDay, endDay) =>
     if (!w.name) continue;
     const k = w.name.trim().toLowerCase();
     (byName[k] = byName[k] || []).push(w.id);
+  }
+  // Widen the map with each worker's curated aliases. Without this, a receipt
+  // stamped "Agent 13" (the label an agent's work-as switch writes, see
+  // authController.js:960) matched no name here and was invisible to this
+  // batch total even though worker_aliases still maps it to its FRO.
+  if (workerIds.length > 0) {
+    try {
+      const { data: aliasRows } = await db
+        .from('worker_aliases')
+        .select('alias_name, worker_id')
+        .in('worker_id', workerIds);
+      const known = new Set(workerIds.map(String));
+      for (const a of aliasRows || []) {
+        const k = String(a.alias_name || '').trim().toLowerCase();
+        // Category labels are not people; never let one become a worker key.
+        if (!k || CATEGORY_LABELS.includes(k)) continue;
+        if (!known.has(String(a.worker_id))) continue;
+        const list = (byName[k] = byName[k] || []);
+        if (!list.some((id) => String(id) === String(a.worker_id))) list.push(a.worker_id);
+      }
+    } catch (e) { /* an alias lookup failure must not lose the canonical names */ }
   }
   if (Object.keys(byName).length === 0) return result;
 
