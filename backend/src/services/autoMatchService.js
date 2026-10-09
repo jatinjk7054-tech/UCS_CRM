@@ -1,5 +1,6 @@
 import db from '../config/db.js';
 import { nextMatchNo, syncEntryToLead, getUnlinkedReceipts, enrichDonorProfileFromReceipt } from '../models/bankAuditModel.js';
+import { resolveOperatorName } from './operatorNameService.js';
 
 const MIN_SCORE = 75;
 const MARGIN = 10;
@@ -131,11 +132,15 @@ export const scoreEntryLead = (entry, lead) => {
 // and generates it into receipts).
 const linkSuspenseToLead = async (receipt, lead) => {
   const donor = lead.fro_assignments?.donor_profiles || {};
-  // Agent stamp comes from whoever actually collected: the lead's credited
-  // worker (the acting FRO during Work As). Assignment owner is only the
-  // fallback when they are the same person.
+  // Agent stamp comes from whoever ACTUALLY collected: the lead's operator_id
+  // during a Work As / cover session (the person at the keyboard). The covered
+  // FRO (fro_worker_id) is only the answer when no operator was recorded, and
+  // the assignment owner is the last fallback.
   let agentName = null;
-  if (lead.fro_worker_id) {
+  const operatorName = await resolveOperatorName(lead.operator_id);
+  if (operatorName?.label || operatorName?.name) {
+    agentName = operatorName.label || operatorName.name;
+  } else if (lead.fro_worker_id) {
     if (String(lead.fro_worker_id) === String(lead.fro_assignments?.fro_worker_id)) {
       agentName = lead.fro_assignments?.workers?.name || null;
     } else {
@@ -333,7 +338,7 @@ const findAutoMatchesRaw = async () => {
   const { data: leads, error: lErr } = await db
     .from('fro_donor_logs')
     .select(`
-      id, fro_worker_id, amount_collected, upi_transaction_id, transaction_datetime, verified_at, created_at,
+      id, fro_worker_id, operator_id, amount_collected, upi_transaction_id, transaction_datetime, verified_at, created_at,
       fro_assignments!inner(
         donor_id,
         fro_worker_id,

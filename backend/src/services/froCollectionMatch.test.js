@@ -189,18 +189,55 @@ test('the log fallback does NOT claim a receipt agent_name gave to another FRO',
   assert.equal(totalCollectionAmount(merged), 7433, 'the total is the actual 7,433, not ~10,284');
 });
 
-test('a blank, category or agent-labelled name still falls back to the log', () => {
+test('a blank or category name still falls back to the log', () => {
   // The fallback must keep working where it is the ONLY evidence, or real
-  // collections disappear. None of these name a real worker.
+  // collections disappear. Neither of these names a real worker.
   const byLog = [
     { id: 's1', agent_name: 'Suspense', amount: 2500, receipt_date: '2026-10-05' },
     { id: 's2', agent_name: null, amount: 700, receipt_date: '2026-10-06' },
-    { id: 's3', agent_name: 'Agent 13', amount: 300, receipt_date: '2026-10-07' },
   ];
   const merged = mergeAttributedReceipts([], byLog, RESOLVERS);
-  assert.equal(merged.length, 3, 'all three are recovered from the log');
-  assert.equal(totalCollectionAmount(merged), 3500);
+  assert.equal(merged.length, 2, 'both are recovered from the log');
+  assert.equal(totalCollectionAmount(merged), 3200);
   merged.forEach((r) => assert.equal(r.attributed_by, 'log'));
+});
+
+test('an agent label falls back to the log only while no alias resolves it', () => {
+  // worker_aliases maps every CRM agent label to the worker that login belongs
+  // to, so a RESOLVED label is somebody's money: the name window is what credits
+  // it, and the log must not hand the same rupees to the covered FRO too.
+  // 'Agent 13' resolves in RESOLVERS; 'Agent 99' has no alias row.
+  const labelRow = { id: 's3', agent_name: 'Agent 13', amount: 300, receipt_date: '2026-10-07' };
+  assert.equal(mergeAttributedReceipts([], [labelRow], RESOLVERS).length, 0, 'a resolved label blocks the log fallback');
+  assert.equal(mergeAttributedReceipts([], [labelRow], new Set()).length, 1, 'an empty resolver map fails open');
+  const unresolved = mergeAttributedReceipts(
+    [],
+    [{ id: 's4', agent_name: 'Agent 99', amount: 150, receipt_date: '2026-10-07' }],
+    RESOLVERS,
+  );
+  assert.equal(unresolved.length, 1, 'an unresolvable label is nobody else\u2019s money');
+  assert.equal(unresolved[0].attributed_by, 'log');
+});
+
+test('a work-as label resolves to the ACTOR, never to the COVERED FRO', () => {
+  // The exact live shape: agent21 (worker fe18...) signs in, covers another
+  // FRO, and the receipt is stamped 'Agent 21' on a log whose fro_worker_id is
+  // the covered worker. One card gets it, not both.
+  const resolvers = new Map([
+    ['muskan khan', 'fe18aa44'],
+    ['agent 21', 'fe18aa44'],
+    ['khushboo rajoria', '8359af4d'],
+  ]);
+  const byLog = [{ id: 'r1', agent_name: 'Agent 21', amount: 30, receipt_date: '2026-10-09' }];
+  const actor = mergeAttributedReceipts(
+    [{ id: 'r1', agent_name: 'Agent 21', amount: 30, receipt_date: '2026-10-09' }],
+    byLog,
+    resolvers,
+    'fe18aa44',
+  );
+  const covered = mergeAttributedReceipts([], byLog, resolvers, '8359af4d');
+  assert.equal(totalCollectionAmount(actor), 30, 'the actor is credited once');
+  assert.equal(covered.length, 0, 'the covered FRO is credited nothing');
 });
 
 test('without a resolver set the fallback still runs (fails open, never hides money)', () => {
@@ -211,7 +248,7 @@ test('without a resolver set the fallback still runs (fails open, never hides mo
   assert.equal(totalCollectionAmount(merged), 1000);
 });
 
-test('namesAnotherWorker recognises a competing claim and ignores labels', () => {
+test('namesAnotherWorker recognises a competing claim and a label only when it resolves', () => {
   assert.equal(namesAnotherWorker('Mamta Shah', RESOLVERS), true);
   // Case and outer whitespace fold; INNER spacing does not, matching the resolver
   // keys, which are built from the same normalizeAgentName over real names.
@@ -223,6 +260,18 @@ test('namesAnotherWorker recognises a competing claim and ignores labels', () =>
   assert.equal(namesAnotherWorker('PG', RESOLVERS), false);
   assert.equal(namesAnotherWorker('', RESOLVERS), false);
   assert.equal(namesAnotherWorker(null, RESOLVERS), false);
+  // 'Agent 13' IS in RESOLVERS (an alias maps it to a worker), so it is money
+  // somebody already owns; 'Agent 99' has no alias row, so it owns nothing.
+  assert.equal(namesAnotherWorker('Agent 13', RESOLVERS), true);
+  assert.equal(namesAnotherWorker('Agent 99', RESOLVERS), false);
+  // With an owner, only somebody ELSE's identity blocks: the owner's own label
+  // must stay claimable through the log when the two windows use different dates.
+  const map = new Map([['agent 13', 'w13'], ['mamta shah', 'wM']]);
+  assert.equal(namesAnotherWorker('Agent 13', map, 'w13'), false, 'own label, own card');
+  assert.equal(namesAnotherWorker('Agent 13', map, 'wOther'), true, "another FRO's card");
+  assert.equal(namesAnotherWorker('Mamta Shah', map, 'w13'), true);
+  assert.equal(namesAnotherWorker('Agent 13', map), true, 'no owner: any resolved person blocks');
+  assert.equal(namesAnotherWorker('Agent 99', map, 'w13'), false, 'unresolved label blocks nothing');
 });
 
 test('the same receipt is counted once even when both signals see it', () => {

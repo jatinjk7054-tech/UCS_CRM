@@ -2,6 +2,7 @@ import db from '../config/db.js';
 import { getNextReceiptNo, projectCodeFromNgoId } from '../models/bankAuditModel.js';
 import { findReceiptByLogId } from '../models/receiptModel.js';
 import { sendPushNotification } from './fcmService.js';
+import { resolveOperatorName } from './operatorNameService.js';
 
 // Credit a bank audit entry whose suggested match (matched_lead_log_id) was
 // confirmed by Accounts. Links the entry's generated receipt (or creates one)
@@ -31,7 +32,7 @@ export const confirmMatchCredit = async (entryId, actorId) => {
   const { data: logs, error: lErr } = await db
     .from('fro_donor_logs')
     .select(`
-      id, amount_collected, action, disposition_detail, accounts_status, fro_worker_id, payment_mode,
+      id, amount_collected, action, disposition_detail, accounts_status, fro_worker_id, operator_id, payment_mode,
       fro_assignments!inner(
         id, fro_worker_id, donor_id, ngo_id,
         ngos(name),
@@ -65,12 +66,17 @@ export const confirmMatchCredit = async (entryId, actorId) => {
   const now = new Date().toISOString();
   const date = entry.transaction_date || new Date().toISOString().slice(0, 10);
 
-  // Credit names come from whoever ACTUALLY collected: the log's credited
-  // worker (the acting FRO during Work As), not the assignment owner. Falls
-  // back to the assignment owner only when they are the same person or the
-  // credited worker cannot be resolved.
+  // Credit names come from whoever ACTUALLY collected. That is the log's
+  // operator_id during a Work As / cover session (the person at the keyboard);
+  // fro_worker_id is the covered FRO and is only the answer when no operator
+  // was recorded. The assignment owner is the last fallback.
   let collectorName = null;
-  if (log.fro_worker_id) {
+  // Label, not human name: receipts.agent_name is the collection grouping key
+  // and the claim-time stamp already writes the agent's label.
+  const operatorName = await resolveOperatorName(log.operator_id);
+  if (operatorName?.label || operatorName?.name) {
+    collectorName = operatorName.label || operatorName.name;
+  } else if (log.fro_worker_id) {
     if (String(log.fro_worker_id) === String(assignment?.fro_worker_id)) {
       collectorName = assignment?.workers?.name || null;
     } else {

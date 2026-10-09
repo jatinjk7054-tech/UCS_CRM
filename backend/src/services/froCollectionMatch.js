@@ -88,27 +88,37 @@ export function receiptMatchesAgentName(agentName, matches) {
  * under a station log) landed in a second FRO's total alongside money that was
  * genuinely hers.
  *
- * An agent label ('Agent 13') or a category label is NOT another person -- those
- * are precisely the rows the fallback exists to recover, since alias resolution
- * is not guaranteed. Only a name that resolves to a real worker blocks it.
+ * A category label is never a competing claim, and a blank name is no claim at
+ * all — those are precisely the rows the fallback exists to recover.
  *
- * resolvers maps a normalized agent_name to the worker id it resolves to, so the
- * caller decides what "resolves to a real worker" means (exact name or curated
- * alias) and this stays a pure comparison.
+ * A CRM agent label ('Agent 21') is different, and the answer now depends on
+ * whether an alias row resolves it: worker_aliases maps every label to the
+ * worker the login belongs to, so a resolved label IS somebody's money. Under
+ * work-as the receipt carries the ACTOR's label while the log's fro_worker_id is
+ * the COVERED FRO, so without this the same rupees landed on both cards.
+ * An unresolvable label is still no evidence of a person, and blocks nothing —
+ * the log is then the only claim on it.
+ *
+ * `resolvers` is a Map of normalized name -> worker id (the loader's). Pass
+ * `ownerId` (the worker the log window is being read for) and a name resolving
+ * to anyone else blocks; the caller's own name does not, so a receipt whose name
+ * window and log window use different dates cannot be dropped by its own owner.
+ * A plain Set — or no ownerId — treats any resolved person as a competing claim,
+ * which is the safe direction: over-attributing a second card is the bug this
+ * function exists to prevent. An empty set/map fails open and claims nothing,
+ * so money is never silently hidden.
  */
-export function namesAnotherWorker(agentName, resolvers) {
+export function namesAnotherWorker(agentName, resolvers, ownerId) {
   const n = normalizeAgentName(agentName);
   if (!n) return false;
   // Blank or a category label: no competing claim.
   if (isCategoryLabel(n)) return false;
-  // An agent label ('Agent 13') resolves to a worker TOO, so it is in the
-  // resolver set -- but it must not block the fallback, because when a label
-  // fails to resolve the log is the only remaining evidence of who collected.
-  // Blocking here would drop real collections, which is the one failure this
-  // whole function exists to prevent. Only a name that is unambiguously some
-  // other person's counts as a competing claim.
-  if (isAgentLabel(n)) return false;
-  if (resolvers instanceof Map) return resolvers.has(n);
+  if (resolvers instanceof Map) {
+    const resolved = resolvers.get(n);
+    if (resolved == null || resolved === '') return false;
+    if (ownerId == null || ownerId === '') return true;
+    return String(resolved) !== String(ownerId);
+  }
   if (resolvers instanceof Set) return resolvers.has(n);
   return false;
 }
@@ -141,8 +151,10 @@ export function namesAnotherWorker(agentName, resolvers) {
  * genuine fallback rather than a second opinion that overrides the name.
  *
  * A receipt is then claimed exactly once, tagged with which signal claimed it.
+ * `ownerId` is the worker this call is loading for: it is what lets a work-as
+ * label resolve to the ACTOR without also feeding the COVERED FRO's card.
  */
-export function mergeAttributedReceipts(byName, byLogId, resolvers) {
+export function mergeAttributedReceipts(byName, byLogId, resolvers, ownerId) {
   const out = [];
   const ids = new Set();
   const take = (rows, tag) => {
@@ -165,7 +177,7 @@ export function mergeAttributedReceipts(byName, byLogId, resolvers) {
   // This is the difference between "name wins" and "name wins and the log may
   // still add": without it, a receipt stamped with a colleague's name but linked
   // to this worker's station log is counted on both cards.
-  take((byLogId || []).filter((r) => !namesAnotherWorker(r && r.agent_name, resolvers)), 'log');
+  take((byLogId || []).filter((r) => !namesAnotherWorker(r && r.agent_name, resolvers, ownerId)), 'log');
   return dedupeCollectionReceipts(out);
 }
 

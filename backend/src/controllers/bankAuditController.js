@@ -5,6 +5,7 @@ import { confirmMatchCredit } from '../services/creditService.js';
 import { getDonorByMobile } from '../models/donorProfileModel.js';
 import { createReceipt } from '../models/receiptModel.js';
 import { sendPushNotification } from '../services/fcmService.js';
+import { resolveOperatorNames } from '../services/operatorNameService.js';
 
 async function getSourceBankName(sourceId) {
   if (!sourceId) return null;
@@ -272,7 +273,7 @@ export const listEntries = async (req, res) => {
       const { data: entryLogs, error: entryLogErr } = await db
         .from('fro_donor_logs')
         .select(`
-          id, accounts_status,
+          id, accounts_status, operator_id,
           workers!fro_donor_logs_fro_worker_id_fkey(name),
           fro_assignments!inner(
             donor_profiles!inner(name, mobile_number)
@@ -281,10 +282,13 @@ export const listEntries = async (req, res) => {
         .in('id', entryLogIds)
         .eq('accounts_status', 'pending');
       if (entryLogErr) throw entryLogErr;
+      // operator_id is the ACTOR behind the claim (Work As / cover session) and
+      // has no FK — resolve it separately and prefer it over the covered FRO.
+      const claimOperatorNames = await resolveOperatorNames((entryLogs || []).map((l) => l.operator_id));
       const claimedByMap = {};
       const claimedDonorMap = {};
       for (const l of entryLogs || []) {
-        claimedByMap[l.id] = l.workers?.name || null;
+        claimedByMap[l.id] = claimOperatorNames.get(String(l.operator_id))?.name || l.workers?.name || null;
         const donor = l.fro_assignments?.donor_profiles;
         claimedDonorMap[l.id] = donor ? { name: donor.name || null, mobile: donor.mobile_number || null } : null;
       }
@@ -313,7 +317,7 @@ export const listEntries = async (req, res) => {
       const { data: logs } = await db
         .from('fro_donor_logs')
         .select(`
-          id, amount_collected,
+          id, amount_collected, operator_id,
           fro_assignments!inner(
             donor_id,
             donor_profiles!inner(id, name, mobile_number, email, pan_number, address_1, address_2, city, pin_code, project_supported),
@@ -322,15 +326,24 @@ export const listEntries = async (req, res) => {
           workers!fro_donor_logs_fro_worker_id_fkey(id, name)
         `)
         .in('id', logIds);
+      const matchOperatorNames = await resolveOperatorNames((logs || []).map((l) => l.operator_id));
       const matchMap = {};
       for (const l of logs || []) {
         const assignment = l.fro_assignments;
         const donor = assignment?.donor_profiles || {};
-        // The FRO shown here must be the ACTUAL credited worker (fro_donor_logs
-        // .fro_worker_id), not the assignment owner — when an acting FRO
-        // "works as" another FRO and claims a lead, the assignment stays with
-        // the owner while the log credits the acting FRO.
-        const worker = { id: l.workers?.id, name: l.workers?.name || assignment?.workers?.name || '' };
+        // The FRO shown here must be whoever ACTUALLY claimed: operator_id is
+        // the actor during a Work As / cover session, fro_worker_id the covered
+        // FRO, and the assignment owner only the last fallback — the assignment
+        // stays with the owner while the claim is made from their account.
+        //
+        // Two different names fall out of that: `fro_name` is what a human reads
+        // (Agent 21 -> their linked worker, Muskan Khan), while
+        // match_lead.agent_name is PREFILLED INTO the receipt's agent_name, so it
+        // must stay the agent label that receipts are already stamped with.
+        const op = matchOperatorNames.get(String(l.operator_id));
+        const displayName = op?.name || l.workers?.name || assignment?.workers?.name || '';
+        const creditName = op?.label || op?.name || l.workers?.name || assignment?.workers?.name || '';
+        const worker = { id: l.workers?.id, name: displayName };
         matchMap[l.id] = {
           donor_name: donor.name || 'Unknown',
           fro_name: worker.name || 'Unknown',
@@ -347,7 +360,7 @@ export const listEntries = async (req, res) => {
             donor_city: donor.city || '',
             donor_pin_code: donor.pin_code || '',
             donor_project: donor.project_supported || '',
-            agent_name: worker.name || '',
+            agent_name: creditName,
           },
         };
       }

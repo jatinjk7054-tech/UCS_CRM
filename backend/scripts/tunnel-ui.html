@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>UCS CRM - Local Dev</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --line: #262b36;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4f8cff;
+    --ok: #3fbf7f;
+    --bad: #e5544b;
+    --warn: #e0a33e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    padding: 10px 18px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: #222733;
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #2a3040; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #3f7bef; }
+  button.danger { border-color: #5a2b2b; color: #ffb3ad; }
+  button.danger:hover:not(:disabled) { background: #3a2020; }
+  .state { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 14px; }
+  .state div { min-width: 190px; }
+  .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .v { font-weight: 600; word-break: break-all; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; background: var(--muted); }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--bad); }
+  .dot.warn { background: var(--warn); }
+  pre {
+    margin: 0;
+    background: #10131a;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+    max-height: 380px;
+    overflow: auto;
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .hint { color: var(--muted); font-size: 12px; margin: 12px 0 0; }
+  code { background: #10131a; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>UCS CRM &mdash; Local Dev</h1>
+  <p class="sub">Runs <code>tunnel-db.mjs backend</code>: opens the SSH tunnel to the database, then starts the backend against it.</p>
+
+  <div class="panel">
+    <div class="state">
+      <div>
+        <div class="k">Tunnel</div>
+        <div class="v"><span class="dot" id="tDot"></span><span id="tState">checking</span></div>
+      </div>
+      <div>
+        <div class="k">Backend</div>
+        <div class="v"><span class="dot" id="bDot"></span><span id="bState">checking</span></div>
+      </div>
+      <div>
+        <div class="k">Endpoint</div>
+        <div class="v" id="bUrl">&mdash;</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <button class="primary" id="btnStart">Start Local</button>
+      <button class="danger" id="btnStop">Stop</button>
+      <button id="btnRefresh">Refresh</button>
+    </div>
+
+    <p class="hint">
+      The backend runs on <code>localhost:5000</code> and reaches Postgres on
+      <code>127.0.0.1:15432</code>, forwarded over SSH to the jump host. Nothing in AWS changes.
+      This panel and the backend are unauthenticated, so use it on a trusted network only.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="k" style="margin-bottom:10px">Output</div>
+    <pre id="log">no output yet</pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+function setState(dotId, stateId, status, label) {
+  const dot = $(dotId);
+  dot.className = 'dot' + (status === 'up' ? ' ok' : status === 'down' ? ' bad' : status === 'starting' ? ' warn' : '');
+  $(stateId).textContent = label;
+}
+
+function render(s) {
+  setState('tDot', 'tState', s.tunnel.running ? 'up' : 'down', s.tunnel.running ? 'up' : 'not running');
+  setState('bDot', 'bState', s.backend.running ? 'up' : s.backend.starting ? 'starting' : 'down',
+    s.backend.running ? `running (pid ${s.backend.pid})` : s.backend.starting ? 'starting' : 'stopped');
+  $('bUrl').textContent = s.backend.running ? s.backend.url : '\u2014';
+  $('log').textContent = s.log.length ? s.log.join('\n') : 'no output yet';
+  $('btnStart').disabled = s.backend.running || s.backend.starting;
+  $('btnStop').disabled = !s.backend.running && !s.tunnel.running;
+}
+
+async function refresh() {
+  try {
+    render(await api('/api/status'));
+  } catch (err) {
+    $('log').textContent = `status failed: ${err.message}`;
+  }
+}
+
+async function post(path, label) {
+  $('btnStart').disabled = true;
+  $('btnStop').disabled = true;
+  try {
+    await api(path, { method: 'POST' });
+  } catch (err) {
+    $('log').textContent += `\n${label} failed: ${err.message}`;
+  }
+  await refresh();
+}
+
+$('btnStart').addEventListener('click', () => post('/api/start', 'start'));
+$('btnStop').addEventListener('click', () => post('/api/stop', 'stop'));
+$('btnRefresh').addEventListener('click', refresh);
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

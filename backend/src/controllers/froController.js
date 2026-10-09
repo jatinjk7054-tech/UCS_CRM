@@ -775,10 +775,14 @@ export const getDashboard = async (req, res) => {
     const todayStart = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 0, 0, 0, 0));
     const todayEnd = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 23, 59, 59, 999));
 
-    const verifiedMonth = await getVerifiedCollection(creditWorkerId, monthStart, monthEnd);
-    const unverifiedMonth = await getUnverifiedCollection(creditWorkerId, monthStart, monthEnd);
-    const verifiedToday = await getVerifiedCollection(creditWorkerId, todayStart.toISOString(), todayEnd.toISOString());
-    const unverifiedToday = await getUnverifiedCollection(creditWorkerId, todayStart.toISOString(), todayEnd.toISOString());
+    // 'credit' rather than the default station attribution: these cards must
+    // name whoever was at the keyboard, the same person the receipt loader
+    // credits, or the panel shows two different owners for one collection.
+    const creditOpts = { attribution: 'credit' };
+    const verifiedMonth = await getVerifiedCollection(creditWorkerId, monthStart, monthEnd, creditOpts);
+    const unverifiedMonth = await getUnverifiedCollection(creditWorkerId, monthStart, monthEnd, creditOpts);
+    const verifiedToday = await getVerifiedCollection(creditWorkerId, todayStart.toISOString(), todayEnd.toISOString(), creditOpts);
+    const unverifiedToday = await getUnverifiedCollection(creditWorkerId, todayStart.toISOString(), todayEnd.toISOString(), creditOpts);
 
     const fyYear = istNow.getUTCMonth() < 3 ? istNow.getUTCFullYear() - 1 : istNow.getUTCFullYear();
     const fyStart = new Date(fyYear, 3, 1);

@@ -1,11 +1,13 @@
 import db, { sql } from '../config/db.js';
 import { maybeRefreshSpecialIncentives } from '../services/specialIncentiveService.js';
+import { resolveCreditTarget } from '../services/operatorNameService.js';
 import {
   CATEGORY_LABELS,
   buildAgentNameMatches,
   escapeLikePattern,
   isCategoryLabel,
   mergeAttributedReceipts,
+  normalizeAgentName,
   paymentIdentity,
 } from '../services/froCollectionMatch.js';
 
@@ -190,31 +192,37 @@ const getWorkerAliasNames = async (workerId) => {
 // Every FRO row is included, so the answer is "yes, it names a real person, not
 // you" for any colleague. Category labels and blanks are absent by
 // construction: they are not workers.
+//
+// Returns a Map of normalized name -> worker id rather than a bare Set, because
+// a CRM agent label ('Agent 21') is only a competing claim once it resolves to
+// somebody — worker_aliases maps every label to the login's worker, and the
+// caller needs to know whether that somebody is itself (a work-as receipt
+// carries the ACTOR's label while the log's fro_worker_id is the COVERED FRO).
 const getAllWorkerNameResolvers = async () => {
-  const resolvers = new Set();
+  const resolvers = new Map();
+  const claim = (name, workerId) => {
+    const n = normalizeAgentName(name);
+    if (!n || isCategoryLabel(n)) return;
+    if (resolvers.has(n)) return;
+    resolvers.set(n, String(workerId));
+  };
   try {
     const { data: workers } = await db
       .from('workers')
-      .select('name')
+      .select('id, name')
       .not('name', 'is', null);
-    for (const w of workers || []) {
-      const n = String(w.name || '').trim().toLowerCase();
-      if (n && !isCategoryLabel(n)) resolvers.add(n);
-    }
+    for (const w of workers || []) claim(w.name, w.id);
   } catch (e) {
-    // Fail open: with no resolver set, the fallback behaves as it did before,
+    // Fail open: with no resolver map, the fallback behaves as it did before,
     // which risks a duplicate credit but never hides a collection.
-    return new Set();
+    return new Map();
   }
   try {
     const { data: aliases } = await db
       .from('worker_aliases')
-      .select('alias_name')
+      .select('alias_name, worker_id')
       .not('alias_name', 'is', null);
-    for (const a of aliases || []) {
-      const n = String(a.alias_name || '').trim().toLowerCase();
-      if (n && !isCategoryLabel(n)) resolvers.add(n);
-    }
+    for (const a of aliases || []) claim(a.alias_name, a.worker_id);
   } catch (e) { /* canonical names alone are enough to spot a competing claim */ }
   return resolvers;
 };
@@ -254,6 +262,16 @@ export const getWorkerCollectionReceipts = async (workerId, monthStart, monthEnd
   const monthEndDay = String(monthEnd).slice(0, 10);
   const RECEIPT_COLS = 'id, donor_id, amount, project_id, receipt_date, receipt_no, payment_id, agent_name, log_id, donor_name, donor_mobile, mode';
 
+  // The id handed in here is creditWorkerId from the FRO panel, which is the
+  // OPERATOR (req.user.imposter_id), not always a workers row: under an agent
+  // login it is a crm_agents uuid. Querying workers/logs with that uuid matched
+  // nothing, so every agent session's Collected card read zero however much had
+  // been verified. Resolve it once — window 1 runs against the linked worker,
+  // window 2 matches the linked worker's name plus the label this session
+  // stamps into receipts.agent_name.
+  const credit = await resolveCreditTarget(workerId);
+  const queryWorkerId = credit?.workerId || workerId;
+
   // Window 1 - authoritative. The log states the owner, so this needs no name at
   // all and is immune to a mislabelled agent_name. Only consulted for receipts
   // whose name gave us nothing (blank, or a category label like 'Suspense'),
@@ -266,7 +284,7 @@ export const getWorkerCollectionReceipts = async (workerId, monthStart, monthEnd
        JOIN fro_donor_logs l ON l.id = r.log_id
        WHERE l.fro_worker_id = $1
          AND r.receipt_date >= $2 AND r.receipt_date <= $3`,
-      [workerId, monthStartDay, monthEndDay]
+      [queryWorkerId, monthStartDay, monthEndDay]
     );
   } catch (e) { byLogId = []; }
 
@@ -274,16 +292,18 @@ export const getWorkerCollectionReceipts = async (workerId, monthStart, monthEnd
   // one of their curated aliases), matched exactly with LIKE wildcards escaped.
   // Category labels are excluded so 'Suspense' bank money is never credited to a
   // person.
-  const { data: worker } = await db.from('workers').select('name').eq('id', workerId).maybeSingle();
+  const { data: worker } = await db.from('workers').select('name').eq('id', queryWorkerId).maybeSingle();
+  const workerName = (credit?.name || worker?.name || '').trim();
   let byName = [];
-  if (worker?.name) {
-    const aliasNames = await getWorkerAliasNames(workerId);
-    const matches = buildAgentNameMatches(worker.name, aliasNames);
+  if (workerName) {
+    const aliasNames = await getWorkerAliasNames(queryWorkerId);
+    const matches = buildAgentNameMatches(workerName, [...aliasNames, credit?.label]);
     const patterns = [...matches]
       .filter((n) => !CATEGORY_LABELS.includes(n))
       .map((n) => escapeLikePattern(n));
     if (patterns.length > 0) {
-      const orClause = patterns.map((_, i) => `lower(btrim(agent_name)) = $${i + 4}`).join(' OR ');
+      // Params start at $3: only the two date bounds precede the name patterns.
+      const orClause = patterns.map((_, i) => `lower(btrim(agent_name)) = $${i + 3}`).join(' OR ');
       try {
         byName = await sql(
           `SELECT ${RECEIPT_COLS}
@@ -296,7 +316,7 @@ export const getWorkerCollectionReceipts = async (workerId, monthStart, monthEnd
     }
   }
 
-  return mergeAttributedReceipts(byName, byLogId, await getAllWorkerNameResolvers());
+  return mergeAttributedReceipts(byName, byLogId, await getAllWorkerNameResolvers(), queryWorkerId);
 };
 
 export const getTotalCollectedByWorker = async (workerId, monthStart, monthEnd) => {
@@ -316,6 +336,12 @@ export const getDailyCollectionByWorker = async (workerId, monthStart, monthEnd)
   const monthStartDay = String(monthStart).slice(0, 10);
   const monthEndDay = String(monthEnd).slice(0, 10);
 
+  // Same operator-vs-worker resolution as the card loader: creditWorkerId may be
+  // a crm_agents uuid under an agent login, and a workers-keyed lookup against
+  // it returns nothing.
+  const credit = await resolveCreditTarget(workerId);
+  const queryWorkerId = credit?.workerId || workerId;
+
   // Authoritative window: linked to this worker's log, in the verified window so
   // the bucket day can be the verification date. Fallback only, for receipts whose
   // name resolved to nobody.
@@ -328,15 +354,16 @@ export const getDailyCollectionByWorker = async (workerId, monthStart, monthEnd)
        JOIN fro_donor_logs l ON l.id = r.log_id
        WHERE l.fro_worker_id = $1
          AND l.verified_at >= $2 AND l.verified_at <= $3`,
-      [workerId, monthStart, monthEnd]
+      [queryWorkerId, monthStart, monthEnd]
     );
   } catch (e) { byLogId = []; }
 
-  const { data: worker } = await db.from('workers').select('name').eq('id', workerId).maybeSingle();
+  const { data: worker } = await db.from('workers').select('name').eq('id', queryWorkerId).maybeSingle();
+  const workerName = (credit?.name || worker?.name || '').trim();
   let byName = [];
-  if (worker?.name) {
-    const aliasNames = await getWorkerAliasNames(workerId);
-    const patterns = [...buildAgentNameMatches(worker.name, aliasNames)]
+  if (workerName) {
+    const aliasNames = await getWorkerAliasNames(queryWorkerId);
+    const patterns = [...buildAgentNameMatches(workerName, [...aliasNames, credit?.label])]
       .filter((n) => !CATEGORY_LABELS.includes(n))
       .map((n) => escapeLikePattern(n));
     if (patterns.length > 0) {
@@ -359,6 +386,7 @@ export const getDailyCollectionByWorker = async (workerId, monthStart, monthEnd)
     byName.map((r) => ({ ...r, verified_at: null })),
     byLogId.map((r) => ({ ...r, verified_at: r.verified_at || null })),
     await getAllWorkerNameResolvers(),
+    queryWorkerId,
   );
 
   const seenPayments = new Set();
@@ -663,36 +691,85 @@ export const getTotalCollectedByDonorAndWorker = async (donorId, workerId) => {
   return total;
 };
 
-export const getVerifiedCollection = async (workerId, startDate, endDate) => {
-  const { data, error } = await db
+// One loader behind the dashboard's Verified and Unverified cards.
+//
+// attribution decides WHOSE row a claim is:
+//
+//   'station' (default) — fro_worker_id, the assignment's FRO. What the NGO
+//     per-FRO report asks for, and the historical behaviour of both callers
+//     that pass a plain workers id.
+//   'credit' — whoever was at the keyboard: operator_id when the row records a
+//     cover, otherwise the worker. This is what the FRO panel's cards pass, and
+//     it is the same rule the receipt loader applies by name, so the Verified
+//     figure sits with the same person the Collected figure sits with.
+//
+// Under an agent login creditWorkerId is a crm_agents uuid, which matches
+// nothing in fro_worker_id — that alone made both cards read zero for every
+// agent session. resolveCreditTarget maps it to the linked worker for the
+// no-cover half; the cover half has to match the id as handed in, because
+// operator_id holds the agent's uuid.
+const loadClaimRows = async ({ workerId, startDate, endDate, dateCol, status, attribution }) => {
+  const scoped = () => db
     .from('fro_donor_logs')
-    .select('amount_collected, fro_worker_id')
-    .eq('fro_worker_id', workerId)
+    .select('id, amount_collected, fro_worker_id, operator_id')
     .eq('disposition_detail', 'lead_done')
-    .eq('accounts_status', 'verified')
-    .gte('verified_at', startDate)
-    .lte('verified_at', endDate);
-  if (error) throw error;
+    .eq('accounts_status', status)
+    .gte(dateCol, startDate)
+    .lte(dateCol, endDate);
 
-  let total = 0;
-  for (const d of data || []) total += parseFloat(d.amount_collected || 0);
-  return { amount: total, count: (data || []).length };
+  if (attribution !== 'credit') {
+    const { data, error } = await scoped().eq('fro_worker_id', workerId);
+    if (error) throw error;
+    return data || [];
+  }
+
+  const credit = await resolveCreditTarget(workerId);
+  const queryWorkerId = credit?.workerId || workerId;
+  const taken = new Map();
+  // Tolerated failures: a non-uuid id would make Postgres refuse the
+  // comparison, and the dashboard must lose a slice of detail rather than the
+  // whole card.
+  try {
+    const { data, error } = await scoped().eq('fro_worker_id', queryWorkerId).is('operator_id', null);
+    if (error) throw error;
+    for (const r of data || []) taken.set(String(r.id), r);
+  } catch (e) { /* station half stands alone */ }
+  try {
+    const { data, error } = await scoped().eq('operator_id', workerId);
+    if (error) throw error;
+    for (const r of data || []) taken.set(String(r.id), r);
+  } catch (e) { /* cover half is optional for an id outside operator_id's spaces */ }
+  return [...taken.values()];
 };
 
-export const getUnverifiedCollection = async (workerId, startDate, endDate) => {
-  const { data, error } = await db
-    .from('fro_donor_logs')
-    .select('amount_collected, fro_worker_id')
-    .eq('fro_worker_id', workerId)
-    .eq('disposition_detail', 'lead_done')
-    .eq('accounts_status', 'pending')
-    .gte('created_at', startDate)
-    .lte('created_at', endDate);
-  if (error) throw error;
+export const getVerifiedCollection = async (workerId, startDate, endDate, options = {}) => {
+  const data = await loadClaimRows({
+    workerId,
+    startDate,
+    endDate,
+    dateCol: 'verified_at',
+    status: 'verified',
+    attribution: options.attribution,
+  });
 
   let total = 0;
-  for (const d of data || []) total += parseFloat(d.amount_collected || 0);
-  return { amount: total, count: (data || []).length };
+  for (const d of data) total += parseFloat(d.amount_collected || 0);
+  return { amount: total, count: data.length };
+};
+
+export const getUnverifiedCollection = async (workerId, startDate, endDate, options = {}) => {
+  const data = await loadClaimRows({
+    workerId,
+    startDate,
+    endDate,
+    dateCol: 'created_at',
+    status: 'pending',
+    attribution: options.attribution,
+  });
+
+  let total = 0;
+  for (const d of data) total += parseFloat(d.amount_collected || 0);
+  return { amount: total, count: data.length };
 };
 
 export const getTotalCollectedByAssignment = async (assignmentId) => {
