@@ -258,6 +258,9 @@ export const getLeadList = async (req, res) => {
       claimant_login: operatorNames.get(String(r.operator_id))?.login || r.workers?.login_id || r.fro_assignments?.workers?.login_id || '',
       claimed_receipt: receiptMap[r.id] || null,
       received_source: entrySourceMap[receiptMap[r.id]?.id] || null,
+      // True when this lead was created by an FRO claiming an Unclaimed-tab
+      // receipt; the Accounts Leads list shows a "Suspense Claimed" tag for it.
+      suspense_claimed: r.disposition_category === 'suspense_claim',
       bank_match: match
         ? {
             entry_id: match.id,
@@ -954,9 +957,19 @@ export const rejectLead = async (req, res) => {
     if (updateAsgnError) throw updateAsgnError;
 
     // Return any suspense receipt attached to the rejected lead back to the
-    // suspense pool (unclaimed) so another FRO can claim it.
+    // suspense pool (unclaimed) so another FRO can claim it. For leads that came
+    // from the FRO Unclaimed tab (marker: disposition_category='suspense_claim')
+    // the receipt's agent_name is also restored to the 'suspense' category label
+    // so it reappears in the Unclaimed pool, and its bank audit entry goes back
+    // to verified (its pre-claim state) so it leaves the regular unverified
+    // suspense pool — the money must land back where it started, not in both.
+    const wasUnclaimedClaim = log.disposition_category === 'suspense_claim';
     try {
-      await db.from('receipts').update({ log_id: null }).eq('log_id', parseInt(logId, 10));
+      const receiptPatch = { log_id: null };
+      // Restore the category label so the receipt reappears in the FRO
+      // Unclaimed pool; the bare-state reset below still handles donor fields.
+      if (wasUnclaimedClaim) receiptPatch.agent_name = 'suspense';
+      await db.from('receipts').update(receiptPatch).eq('log_id', parseInt(logId, 10));
     } catch (err) { console.error('Failed to clear receipt log_id on rejection:', err.message); }
 
     // Fully revert the linked bank audit entry so the money leaves the matched
@@ -974,30 +987,37 @@ export const rejectLead = async (req, res) => {
     try {
       const { data: entries } = await db
         .from('bank_audit_entries')
-        .select('id, receipt_id, payer_name')
+        .select('id, receipt_id, payer_name, pre_claim_status')
         .eq('matched_lead_log_id', logId);
       rejectedEntries = entries || [];
     } catch (err) { console.error('Failed to read bank audit entries on lead rejection:', err.message); }
 
     try {
-      await db.from('bank_audit_entries').update({
-        status: 'unverified',
-        matched_lead_log_id: null,
-        match_status: null,
-        match_source: null,
-        match_no: null,
-        matched_by: null,
-        matched_at: null,
-        donor_id: null,
-        donor_mobile: null,
-        donor_email: null,
-        donor_pan: null,
-        donor_address_1: null,
-        donor_address_2: null,
-        donor_city: null,
-        donor_pin_code: null,
-        updated_at: new Date().toISOString(),
-      }).eq('matched_lead_log_id', logId);
+      // Restore each entry to the audit status it had BEFORE the claim: a
+      // manually-verified suspense entry goes back to verified; an entry that
+      // was unverified stays unverified. Falls back to unverified when the
+      // pre-claim status was never recorded.
+      for (const en of rejectedEntries) {
+        await db.from('bank_audit_entries').update({
+          status: en.pre_claim_status || 'unverified',
+          match_status: null,
+          matched_lead_log_id: null,
+          match_source: null,
+          match_no: null,
+          matched_by: null,
+          matched_at: null,
+          donor_id: null,
+          donor_mobile: null,
+          donor_email: null,
+          donor_pan: null,
+          donor_address_1: null,
+          donor_address_2: null,
+          donor_city: null,
+          donor_pin_code: null,
+          pre_claim_status: null,
+          updated_at: new Date().toISOString(),
+        }).eq('id', en.id);
+      }
     } catch (err) { console.error('Failed to revert bank audit entry on lead rejection:', err.message); }
 
     // Restore the linked suspense receipt to its bare state so the rejected

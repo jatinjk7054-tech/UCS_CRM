@@ -314,7 +314,7 @@ export default function Dashboard({ embedded, onStats, selectedLogId, onSelectLe
           <div className="entry-grid">
             {loading ? (
               Array.from({ length: 6 }, (_, i) => (
-                <div key={i} className="entry-card">
+                <div key={i} className="entry-card is-skeleton">
                   <div className="ec-main">
                     <div className="ec-primary">
                       <div className="sk" style={{ width: '45%', height: 13, borderRadius: 4 }} />
@@ -333,13 +333,14 @@ export default function Dashboard({ embedded, onStats, selectedLogId, onSelectLe
                 {searchQuery ? 'No leads match your search.' : 'No leads found.'}
               </div>
             ) : (
-              pageItems.map(l => {
+              pageItems.map((l, idx) => {
               const ngo = l.bank_match ? NGO_CARD[l.donor_project] : null;
               const isMatched = !!l.bank_match;
               const shouldWave = waveHeroId === String(l.log_id);
               return (
               <div key={l.log_id} data-lead-log={l.log_id} data-match-entry={l.bank_match?.entry_id || ''} data-match-st={l.bank_match?.match_status || ''} data-match-src={l.bank_match?.match_source || ''}
-                className={'entry-card' + (selectedLogId === l.log_id ? ' is-selected' : '') + (l.accounts_status !== 'pending' ? ' is-dim' : '') + (l.bank_match ? (l.bank_match.match_source === 'manual' ? ' is-match-manual' : ' is-match-auto') : ' is-match-unmatched')}
+                className={'entry-card' + (selectedLogId === l.log_id ? ' is-selected' : '') + (l.accounts_status !== 'pending' ? ' is-dim' : '') + (l.suspense_claimed ? ' is-suspense-claimed' : '') + (l.bank_match ? (l.bank_match.match_source === 'manual' ? ' is-match-manual' : ' is-match-auto') : ' is-match-unmatched')}
+                style={idx === 0 ? { paddingTop: 22 } : undefined}
                 onClick={() => {
                   if (!onSelectLead) { setViewingId(l.log_id); onView?.(l.log_id); return; }
                   if (clickRef.current) clearTimeout(clickRef.current);
@@ -361,10 +362,11 @@ export default function Dashboard({ embedded, onStats, selectedLogId, onSelectLe
                     else onSelectLead(l);
                   }
                 }}>
+                {l.suspense_claimed && <span className="twinkle-corner"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0L14.59 8.41L23 11L14.59 13.59L12 22L9.41 13.59L1 11L9.41 8.41Z"/></svg></span>}
                 <div className="ec-main">
                   <div className="ec-primary">
                     <div className="ec-title">{l.donor_name}</div>
-                    <div className="ec-sub">{l.donor_mobile || '\u2014'}</div>
+                    <div className="ec-sub">{l.donor_mobile || '\u2014'} <span style={{display:'inline-block',width:2,height:11,background:'#9ca3af',borderRadius:1,verticalAlign:'middle',margin:'0 8px'}} /> {fmtDT(l.transaction_datetime || l.created_at)}</div>
                     {l.audit_name && String(l.audit_name).trim().toLowerCase() !== String(l.donor_name || '').trim().toLowerCase() && (
                       <div className="ec-sub" style={{ fontSize: 10, color: 'var(--ink-soft)', opacity: .8 }}>as per bank: {l.audit_name}</div>
                     )}
@@ -378,11 +380,11 @@ export default function Dashboard({ embedded, onStats, selectedLogId, onSelectLe
                    l.accounts_status === 'rejected' ? <span className="pill pill-red" title={l.rejection_reason || ''}>Rejected</span> :
                    <span className="pill pill-gray">{l.accounts_status || '\u2014'}</span>}
                   <span className="pill pill-gray">{({ bsct: 'Being Sevak', mann: 'Mann Care', aflf: 'Ashray' })[l.donor_project] || l.donor_project || '\u2014'}</span>
+                  {l.suspense_claimed && <span className="pill" style={{ fontSize: 10, fontWeight: 700, background: '#fef3c7', color: '#92400e', whiteSpace: 'nowrap', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 5 }} title="This lead was created by claiming an Unclaimed suspense receipt"><span className="pulse-dot" />Suspense Claimed</span>}
                   {l.upi_transaction_id && <span className="pill pill-gray" style={{ fontFamily: 'monospace' }} title="Incoming payment ID">{l.upi_transaction_id}</span>}
                   {l.claimed_receipt && <span className="pill" style={{ fontSize: 10, background: '#FDE7DB', color: '#B5603A' }}>{l.claimant_name || 'Claimant'}{l.agent_name && l.agent_name !== l.claimant_name ? ` | ${l.agent_name}` : ''}</span>}
                   {l.bank_match && <span className="pill" style={{ fontSize: 10, background: '#ffedd5', color: '#c2410c' }} title={`${l.bank_match.match_source === 'manual' ? 'Manually' : 'Auto'} matched${l.bank_match.match_score ? ` · score ${l.bank_match.match_score}` : ''}`}>Matched</span>}
                   {!l.claimed_receipt && <span className="ec-agent">{l.claimant_name || l.agent_name || 'No agent'}</span>}
-                  <span className="ec-date">{fmtDT(l.transaction_datetime || l.created_at)}</span>
                   {l.accounts_status === 'pending' && l.agent_name === 'Priyank Shah' && (
                     <button className="btn btn-sm" onClick={e => { e.stopPropagation(); setQuickVerifyLead(l); setQuickVerifyName('Priyank Shah'); }}
                       style={{ fontSize: 10, padding: '3px 8px', background: '#059669', color: '#fff', border: 'none', borderRadius: 4, fontWeight: 600, cursor: 'pointer', marginLeft: 4 }}>

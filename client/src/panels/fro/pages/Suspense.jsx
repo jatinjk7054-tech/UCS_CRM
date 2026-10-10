@@ -317,9 +317,15 @@ export default function FroSuspense() {
 
   const list = useMemo(() => {
     let base = [...(receipts || [])];
-    if (ngoFilter) base = base.filter(r => r.project_id === ngoFilter);
+    if (ngoFilter === '__unclaimed') base = base.filter(r => r.pool === 'unclaimed');
+    else base = base.filter(r => r.pool !== 'unclaimed' && (!ngoFilter || r.project_id === ngoFilter));
     const q = query.trim().toLowerCase();
-    if (q) base = base.filter(r => (r.donor_name || '').toLowerCase().includes(q) || (r.donor_mobile || '').includes(q));
+    if (q) base = base.filter(r =>
+      (r.donor_name || '').toLowerCase().includes(q) ||
+      (r.donor_mobile || '').includes(q) ||
+      (r.receipt_no || '').toLowerCase().includes(q) ||
+      (r.payment_id || '').toLowerCase().includes(q)
+    );
     return base.sort((a, b) => recencyMs(b) - recencyMs(a));
   }, [receipts, ngoFilter, query]);
 
@@ -362,8 +368,10 @@ export default function FroSuspense() {
       {/* Toolbar: NGO pill tabs + search */}
       <div style={{ padding: isCompact ? '10px 12px 6px' : '14px 18px 8px', flexShrink: 0, minWidth: 0 }}>
         <div style={{ display: 'flex', width: '100%', background: 'var(--bg)', border: '1px solid var(--line)', borderRadius: 10, padding: 3, overflowX: 'auto', minWidth: 0 }}>
-          {[['', 'All']].concat(ngos.map(p => [p, NGO_SHORT[p] || p.toUpperCase()])).map(([v, l]) => {
-            const count = v ? receipts.filter(r => r.project_id === v).length : receipts.length;
+          {[['', 'All'], ['__unclaimed', 'Unclaimed']].concat(ngos.map(p => [p, NGO_SHORT[p] || p.toUpperCase()])).map(([v, l]) => {
+            const count = v === '__unclaimed'
+              ? receipts.filter(r => r.pool === 'unclaimed').length
+              : receipts.filter(r => r.pool !== 'unclaimed' && (!v || r.project_id === v)).length;
             const active = ngoFilter === v;
             return (
               <button key={v || 'all'} onClick={() => setNgoFilter(v)}
@@ -404,19 +412,22 @@ export default function FroSuspense() {
             <span style={{ width: 54, height: 54, borderRadius: '50%', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Inbox size={24} />
             </span>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{query ? 'No matching receipts' : 'No suspense receipts'}{ngoFilter ? ' for this NGO' : ''}</div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{query ? 'No matching receipts' : 'No suspense receipts'}{ngoFilter === '__unclaimed' ? ' in the unclaimed pool' : ngoFilter ? ' for this NGO' : ''}</div>
             <div style={{ fontSize: 11 }}>{query ? 'Try a different name or mobile number.' : 'New suspense receipts will appear here.'}</div>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {list.map(r => {
-              const badge = r.waiting_receipt_no ? { text: 'Waiting for receipt number', color: '#6b7280', bg: '#f3f4f6' } : r.kind === 'receipt_sent' ? CLAIM_BADGES.receipt_sent : r.my_claim_status ? CLAIM_BADGES[r.my_claim_status] : null;
+              const badge = r.pool === 'unclaimed'
+                ? { text: 'Unclaimed', color: '#92400e', bg: '#fef3c7' }
+                : r.waiting_receipt_no ? { text: 'Waiting for receipt number', color: '#6b7280', bg: '#f3f4f6' } : r.kind === 'receipt_sent' ? CLAIM_BADGES.receipt_sent : r.my_claim_status ? CLAIM_BADGES[r.my_claim_status] : null;
               const claimable = !r.waiting_receipt_no && (!r.my_claim_status || r.kind === 'receipt_sent');
               const amtStr = currency(r.amount);
               const amtW = isCompact ? 78 : 96;
               const amtFont = amtStr.length >= 12 ? (isCompact ? 8 : 10) : amtStr.length >= 10 ? (isCompact ? 9 : 11) : amtStr.length >= 8 ? (isCompact ? 10 : 12.5) : amtStr.length >= 6 ? (isCompact ? 11.5 : 13.5) : (isCompact ? 13 : 15);
               const isNew = newIds.has(suspenseKey(r));
               const pill = NGO_PILL[r.project_id] || { bg: 'var(--card-bg)' };
+              const isUnclaimed = r.pool === 'unclaimed';
               return (
                 <div key={r.id} onClick={() => claimable && openClaimModal(r)}
                   onMouseOver={e => { e.currentTarget.style.borderColor = 'var(--sage)'; e.currentTarget.style.boxShadow = '0 4px 14px rgba(0,0,0,.08)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
@@ -424,7 +435,7 @@ export default function FroSuspense() {
                   style={{
                     position: 'relative', overflow: 'hidden',
                     display: 'flex', alignItems: 'center', gap: isCompact ? 8 : 12, padding: isCompact ? '10px 10px' : '12px 14px',
-                    background: isNew ? 'var(--card-bg)' : pill.bg, border: '1px solid var(--line)', borderRadius: 'var(--radius-sm)',
+                    background: isUnclaimed ? pill.bg : (isNew ? 'var(--card-bg)' : pill.bg), border: '1px solid var(--line)', borderRadius: 'var(--radius-sm)',
                     boxShadow: 'var(--shadow)', cursor: claimable ? 'pointer' : 'default', transition: 'transform .12s, box-shadow .12s, border-color .12s',
                   }}>
                   {isNew && (

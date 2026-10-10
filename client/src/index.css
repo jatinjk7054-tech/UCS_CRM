@@ -1518,6 +1518,14 @@
 .panel-accounts .clickable-row, .panel-ngo-admin .clickable-row, .panel-fro .clickable-row { cursor:pointer; }
 .panel-accounts .clickable-row:hover, .panel-ngo-admin .clickable-row:hover, .panel-fro .clickable-row:hover { background:#f9fafb; }
 .panel-accounts .pill, .panel-ngo-admin .pill, .panel-fro .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:500; }
+/* Rectangular pills with a slight radius inside entry tiles */
+.panel-accounts .entry-card .pill,
+.panel-accounts .entry-card .pill-green,
+.panel-accounts .entry-card .pill-yellow,
+.panel-accounts .entry-card .pill-red,
+.panel-accounts .entry-card .pill-blue,
+.panel-accounts .entry-card .pill-gray,
+.panel-accounts .entry-card .pill-purple { border-radius:4px; }
 .panel-accounts .pill-green, .panel-ngo-admin .pill-green, .panel-fro .pill-green { background:#dcfce7; color:#166534; }
 .panel-accounts .pill-yellow, .panel-ngo-admin .pill-yellow, .panel-fro .pill-yellow { background:#fef3c7; color:#92400e; }
 .panel-accounts .pill-red, .panel-ngo-admin .pill-red, .panel-fro .pill-red { background:#fef2f2; color:#991b1b; }
@@ -1649,6 +1657,96 @@
 .panel-accounts .entry-scroll { height:auto; max-height:min(62vh,620px); overflow-y:auto; padding-right:4px; scrollbar-width:none; -ms-overflow-style:none; }
 .panel-accounts .entry-scroll::-webkit-scrollbar { display:none; width:0; height:0; }
 .panel-accounts .entry-card { position:relative; background:var(--card-bg); border:1px solid var(--line); border-radius:12px; padding:12px 14px; box-shadow:0 1px 2px rgba(0,0,0,.04); cursor:pointer; transition:box-shadow .15s, transform .15s, border-color .15s; }
+/* L-shaped corner brackets on every accounts entry tile — orange on
+   matched/connected tiles, neutral gray on unmatched. Drawn on ::before/::after
+   so inline tile backgrounds (NGO tints) cannot wipe them out. Flush to the
+   tile corners. */
+.panel-accounts .entry-card::before,
+.panel-accounts .entry-card::after {
+  content:'';
+  position:absolute;
+  width:100%;
+  height:100%;
+  top:0;
+  left:0;
+  pointer-events:none;
+  z-index:2;
+  background-repeat:no-repeat;
+}
+.panel-accounts .entry-card.is-skeleton::before,
+.panel-accounts .entry-card.is-skeleton::after {
+  content:none;
+}
+.panel-accounts .entry-card::before {
+  background-image:
+    linear-gradient(#9ca3af,#9ca3af), linear-gradient(#9ca3af,#9ca3af),
+    linear-gradient(#9ca3af,#9ca3af), linear-gradient(#9ca3af,#9ca3af);
+  background-size: 26px 4px, 4px 26px, 26px 4px, 4px 26px;
+  background-position:
+    top left, top left,
+    top right, top right;
+}
+.panel-accounts .entry-card::after {
+  background-image:
+    linear-gradient(#9ca3af,#9ca3af), linear-gradient(#9ca3af,#9ca3af),
+    linear-gradient(#9ca3af,#9ca3af), linear-gradient(#9ca3af,#9ca3af);
+  background-size: 26px 4px, 4px 26px, 26px 4px, 4px 26px;
+  background-position:
+    bottom left, bottom left,
+    bottom right, bottom right;
+}
+/* Matched / connected tiles: orange corners */
+.panel-accounts .entry-card.is-match-auto::before,
+.panel-accounts .entry-card.is-match-auto::after,
+.panel-accounts .entry-card.is-match-manual::before,
+.panel-accounts .entry-card.is-match-manual::after,
+.panel-accounts .entry-card.is-match-static::before,
+.panel-accounts .entry-card.is-match-static::after {
+  background-image:
+    linear-gradient(#f59e0b,#f59e0b), linear-gradient(#f59e0b,#f59e0b),
+    linear-gradient(#f59e0b,#f59e0b), linear-gradient(#f59e0b,#f59e0b);
+}
+
+/* Twinkling sparkle icon in the top-right corner of suspense-claimed tiles.
+   Kept inside the tile bounds so scroll containers never clip it. */
+@keyframes twinkle {
+  0%, 100% { opacity: 1; transform: scale(1) rotate(0deg); }
+  25%      { opacity: .5; transform: scale(.8) rotate(-12deg); }
+  50%      { opacity: 1; transform: scale(1.2) rotate(0deg); }
+  75%      { opacity: .6; transform: scale(.85) rotate(10deg); }
+}
+.twinkle-corner {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 3;
+  color: #eab308;
+  pointer-events: none;
+  animation: twinkle 2s ease-in-out infinite;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.18));
+}
+.twinkle-corner svg { display: block; }
+@media (prefers-reduced-motion: reduce) {
+  .twinkle-corner { animation: none; }
+}
+
+/* Green pulsing dot on the Suspense Claimed tag. */
+@keyframes pulseDot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(22,163,74,.45); }
+  50%      { box-shadow: 0 0 0 5px rgba(22,163,74,0); }
+}
+.pulse-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #16a34a;
+  flex-shrink: 0;
+  animation: pulseDot 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot { animation: none; }
+}
 .panel-accounts .entry-card:hover { box-shadow:0 6px 16px rgba(0,0,0,.08); transform:translateY(-1px); border-color:#d5dae2; }
 .panel-accounts .entry-card.is-selected { 
   background:rgba(91, 107, 78, 0.15); 
@@ -1657,10 +1755,7 @@
   padding:11px 13px;
 }
 .panel-accounts .entry-card.is-suspense { background:#fffaf5; }
-.panel-accounts .entry-card.is-match-auto { border-left:20px solid #16a34a; }
-.panel-accounts .entry-card.is-match-manual { border-left:20px solid #f59e0b; }
-.panel-accounts .entry-card.is-match-static { border-left:20px solid #ca8a04; background:#fefce8; }
-.panel-accounts .entry-card.is-match-unmatched { border-left:20px solid #d1d5db; }
+.panel-accounts .entry-card.is-match-static { background:#fefce8; }
 .panel-accounts .entry-card.is-dim { opacity:.62; }
 .panel-accounts .ec-main { display:flex; align-items:center; gap:10px; min-width:0; }
 .panel-accounts .ec-avatar { width:34px; height:34px; border-radius:50%; background:#5B6B4E18; color:var(--sage); display:flex; align-items:center; justify-content:center; font-weight:700; font-size:13px; flex-shrink:0; }
@@ -1735,17 +1830,15 @@
 }
 .panel-accounts .lead-audit-columns { grid-template-columns: 0.8fr 1fr; gap:64px; }
 .panel-accounts .lead-audit-columns > div { min-width:0; }
-.panel-accounts .lead-audit-columns .card { background:transparent; border-color:transparent; box-shadow:none; overflow:hidden; }
+.panel-accounts .lead-audit-columns .card { background:transparent; border-color:transparent; box-shadow:none; overflow:visible; }
 .panel-accounts .lead-audit-columns .filter-bar { background:var(--card-bg); border:1px solid #dce4ee; border-radius:11px; box-shadow:0 2px 8px rgba(31,55,86,.05); }
 .panel-accounts .lead-audit-columns .entry-scroll { max-height:min(68vh,720px); padding:2px 4px 2px 0; background:transparent; }
 .panel-accounts .lead-audit-columns .entry-scroll { max-height:none; overflow:visible; }
-.panel-accounts .lead-audit-columns .entry-grid { gap:9px; }
+.panel-accounts .lead-audit-columns .entry-grid { gap:9px; padding:4px 6px; }
 .panel-accounts .lead-audit-columns .entry-card { border-radius:10px; padding:13px 14px; }
+.panel-accounts .lead-audit-columns > div:first-child .entry-card { padding:6px 10px; border-radius:0; }
 .panel-accounts .lead-audit-columns .entry-card,
 .panel-accounts .lead-audit-columns .entry-card.is-suspense { background:transparent; box-shadow:none; }
-.panel-accounts .lead-audit-columns .entry-card.is-match-auto { border-left-width:6px; }
-.panel-accounts .lead-audit-columns .entry-card.is-match-manual { border-left-width:6px; }
-.panel-accounts .lead-audit-columns .entry-card.is-match-unmatched { border-left-width:6px; }
 .panel-accounts .lead-audit-columns .ec-title { font-size:12px; }
 .panel-accounts .lead-audit-columns .ec-amount { font-size:15px; }
 .panel-accounts .lead-audit-columns .ec-meta { margin-top:9px; padding-top:9px; }

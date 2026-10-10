@@ -25,7 +25,26 @@ pg.types.setTypeParser(1114, (v) => v);                        // timestamp -> r
 pg.types.setTypeParser(1082, (v) => v);                        // date -> string
 pg.types.setTypeParser(1083, (v) => v);                        // time -> string
 
-const poolConfig = { max: 5, idleTimeoutMillis: 10000, connectionTimeoutMillis: 20000, maxUses: 1000 };
+// Pool size is the number that decides what a slow query costs the rest of the
+// app: at max 5 the fifth concurrent slow query makes every OTHER request queue
+// for a free connection, which is what "the site keeps loading" looks like to a
+// user on a fast network.
+//
+// Raising it buys concurrency but costs RAM and CPU: every connection can run
+// its own sorts at work_mem each. On a 2-vCPU instance, 10 connections running
+// CPU-heavy queries can be SLOWER than 5, because they contend rather than
+// queue. Past ~10 there is usually a query that needs an index, not more slots.
+//
+// Overridable per environment so a busy box can be given headroom without a code
+// change. Watch server max_connections before going much above this -- the
+// backend, the panel and RDS internal sessions all share the same budget.
+const POOL_MAX = Math.max(1, parseInt(process.env.PG_POOL_MAX || '5', 10));
+const poolConfig = {
+  max: POOL_MAX,
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 20000,
+  maxUses: 1000,
+};
 if (process.env.DATABASE_URL) {
   poolConfig.connectionString = process.env.DATABASE_URL;
   poolConfig.ssl = process.env.DATABASE_SSL !== 'false' ? { rejectUnauthorized: false } : false;

@@ -72,6 +72,14 @@
   .bar > div { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--accent2)); }
   .bar > div.warn { background: var(--warn); }
   .bar > div.danger { background: var(--danger); }
+  /* Read/write split: two segments sharing one track, so the ratio is visible
+     without inventing a fixed "max" for two rates that have no natural ceiling. */
+  .split { height: 10px; background: var(--panel2); border-radius: 5px; margin-top: 10px; overflow: hidden; display: flex; }
+  .split > div { height: 100%; transition: width .3s ease; }
+  .split > div.reads { background: var(--accent); }
+  .split > div.writes { background: var(--accent2); }
+  .splitLegend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .splitLegend .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
   .project {
     background: var(--panel);
@@ -132,6 +140,7 @@
   .status-online { color: var(--accent2); }
   .status-errored, .status-stopped { color: var(--danger); }
   .muted { color: var(--muted); }
+  .hint { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
 
   dialog {
     background: var(--panel);
@@ -240,6 +249,24 @@
     <div id="pm2Wrap" style="margin-top:14px"></div>
   </section>
 
+  <section>
+    <h2>Live Queries</h2>
+    <div id="queryWrap"></div>
+  </section>
+
+  <section>
+    <h2>Connections</h2>
+    <div id="clientWrap"></div>
+  </section>
+
+  <section>
+    <h2>Database</h2>
+    <div class="cards" id="dbCards"></div>
+    <div id="dbSplit" style="margin-top:14px"></div>
+    <div id="dbWrap" style="margin-top:14px"></div>
+    <p class="hint" id="dbHint"></p>
+  </section>
+
   <section id="projectsSection">
     <h2>Projects</h2>
     <div class="grid" id="projectsGrid"></div>
@@ -281,6 +308,16 @@
 </dialog>
 
 <div class="toast" id="toast"></div>
+
+<dialog id="dbDialog">
+  <div class="dlg-head">
+    <h3>Deadlocks</h3>
+    <span class="path">Postgres lock contention</span>
+    <div class="spacer"></div>
+    <button id="dbDlgClose">Close</button>
+  </div>
+  <div class="dlg-body" id="dbDlgBody"></div>
+</dialog>
 
 <script>
 (function () {
@@ -414,6 +451,262 @@
     }).catch(function (e) {
       setStatus(e.message, 'err');
       toast(e.message, 'err');
+    });
+  }
+
+  // ---- database -----------------------------------------------------------
+  function fmtNum(n) {
+    if (n == null) return 'n/a';
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  function renderDb(d) {
+    var s = d.per_sec;
+    var writes = s.inserts + s.updates + s.deletes;
+    var html = '';
+    html += card('Reads / sec', fmtNum(s.reads), { small: true });
+    html += card('Writes / sec', fmtNum(writes), { small: true });
+    html += card('Commits / sec', fmtNum(s.commits), { small: true });
+    // Under ~90% and queries are starting to hit disk instead of cache. Above 99%
+    // is healthy and the bar is full, so it reads as "nothing to worry about".
+    html += card('Cache Hit', d.cache_hit_pct != null ? d.cache_hit_pct + '%' : 'n/a',
+      { pct: d.cache_hit_pct != null ? Math.min(100, d.cache_hit_pct) : 0, small: true });
+    html += card('Total Writes', fmtNum(d.totals.inserts + d.totals.updates + d.totals.deletes), { small: true });
+    html += '<div class="card" id="deadlockCard" title="Click for what caused these"><div class="label">Deadlocks</div>' +
+      '<div class="value small">' + fmtNum(d.totals.deadlocks) + '</div>' +
+      '<div class="bar"><div class="' + (d.totals.deadlocks > 0 ? 'danger' : '') +
+      '" style="width:' + (d.totals.deadlocks > 0 ? 100 : 0) + '%"></div></div></div>';
+    $('dbCards').innerHTML = html;
+
+    // Reads and writes per second have no fixed ceiling, so a plain percentage
+    // bar would need an invented "max". Instead they share one track and each
+    // takes its true share of the pair -- the ratio is what is worth seeing, and
+    // a read-heavy workload reads as mostly blue rather than a fake "40%".
+    var total = s.reads + writes;
+    var readPct = total > 0 ? (s.reads / total) * 100 : 0;
+    var writePct = total > 0 ? (writes / total) * 100 : 0;
+    $('dbSplit').innerHTML =
+      '<div class="split">' +
+        '<div class="reads" style="width:' + readPct + '%"></div>' +
+        '<div class="writes" style="width:' + writePct + '%"></div>' +
+      '</div>' +
+      '<div class="splitLegend">' +
+        '<span><span class="swatch" style="background:var(--accent)"></span>Reads ' + fmtNum(s.reads) + '/s (' + readPct.toFixed(0) + '%)</span>' +
+        '<span><span class="swatch" style="background:var(--accent2)"></span>Writes ' + fmtNum(writes) + '/s (' + writePct.toFixed(0) + '%)</span>' +
+      '</div>';
+
+    $('deadlockCard').addEventListener('click', showDeadlocks);
+
+    var tbl = '';
+    if (d.tables && d.tables.length) {
+      tbl += '<table><thead><tr><th>Table</th><th>Ins</th><th>Upd</th><th>Del</th><th>Seq Scans</th><th>Idx Scans</th><th>Live Rows</th><th>Dead Rows</th></tr></thead><tbody>' +
+        d.tables.map(function (t) {
+          return '<tr><td class="mono">' + esc(t.table) + '</td>' +
+            '<td>' + fmtNum(t.n_tup_ins) + '</td>' +
+            '<td>' + fmtNum(t.n_tup_upd) + '</td>' +
+            '<td>' + fmtNum(t.n_tup_del) + '</td>' +
+            '<td>' + fmtNum(t.seq_scan) + '</td>' +
+            '<td>' + fmtNum(t.idx_scan) + '</td>' +
+            '<td>' + fmtNum(t.n_live_tup) + '</td>' +
+            '<td>' + fmtNum(t.n_dead_tup) + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    } else {
+      tbl = '<p class="muted">No table traffic recorded yet.</p>';
+    }
+
+    if (d.by_app && d.by_app.length) {
+      tbl += '<table style="margin-top:14px"><thead><tr><th>Application</th><th>Client</th><th>Conns</th><th>Stuck</th><th>Waiting</th><th>Oldest Idle Tx</th></tr></thead><tbody>' +
+        d.by_app.map(function (a) {
+          return '<tr><td class="mono">' + esc(a.app) + '</td>' +
+            '<td class="mono">' + esc(a.client) + '</td>' +
+            '<td>' + a.conns + '</td>' +
+            '<td>' + (a.stuck ? '<span style="color:var(--danger)">' + a.stuck + '</span>' : '0') + '</td>' +
+            '<td>' + a.waiting + '</td>' +
+            '<td>' + (a.oldest_idle_s != null ? Math.round(a.oldest_idle_s) + 's' : '—') + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    $('dbWrap').innerHTML = tbl;
+
+    $('dbHint').textContent =
+      'Reads/writes per second are sampled over a 1s window. Totals and the table ' +
+      'breakdown are cumulative since the last Postgres stats reset, and they cover ' +
+      'the whole database — on RDS that includes the production backend, not just local.';
+  }
+
+  // ---- deadlocks ----------------------------------------------------------
+  // ---- live queries -------------------------------------------------------
+  // The "site keeps loading on a fast network" symptom is almost always pool
+  // saturation, not CPU or network. db.js caps the pool at 5, so the 5th
+  // concurrent slow query makes every OTHER request in the app wait for a free
+  // connection. Surfacing pool.busy against pool.app_max is the number that
+  // explains it.
+  function renderQueries(d) {
+    var p = d.pool;
+    var pct = Math.min(100, (p.busy / p.app_max) * 100);
+    var cls = p.saturated ? 'danger' : (p.busy >= 3 ? 'warn' : '');
+    var h = '<div class="cards">';
+    h += '<div class="card"><div class="label">Pool In Use</div><div class="value small">' +
+         p.busy + ' / ' + p.app_max + '</div><div class="bar"><div class="' + cls +
+         '" style="width:' + pct + '%"></div></div></div>';
+    var realActive = d.active.filter(function (a) { return !a.is_panel; });
+    h += '<div class="card"><div class="label">Running Now</div><div class="value small">' +
+         realActive.length + '</div></div>';
+    h += '<div class="card"><div class="label">Blocked on Lock</div><div class="value small">' +
+         realActive.filter(function (a) { return a.blocked; }).length + '</div></div>';
+    var slowest = d.slow_history.length ? d.slow_history[0].max_s : 0;
+    h += '<div class="card"><div class="label">Slowest Seen</div><div class="value small">' +
+         (slowest ? slowest.toFixed(1) + 's' : 'none') + '</div></div>';
+    h += '</div>';
+
+    if (p.saturated) {
+      h += '<p style="color:var(--warn);margin-top:12px"><strong>Pool saturated.</strong> Every ' +
+           'request is queued behind these queries. This is what "the site keeps loading" looks ' +
+           'like when the network is fine.</p>';
+    }
+    if (d.by_state) {
+      h += '<p class="hint">Pool and lock counts exclude this panel\'s own polling, which would ' +
+           'otherwise show up as load on the pool it is measuring.</p>';
+    }
+
+    if (realActive.length) {
+      h += '<table style="margin-top:14px"><thead><tr><th>Running</th><th>From</th><th>State</th><th>Wait</th><th>Query</th></tr></thead><tbody>' +
+        realActive.map(function (a) {
+          return '<tr><td>' + (a.dur_s != null ? a.dur_s.toFixed(1) + 's' : '—') + '</td>' +
+            '<td class="mono muted">' + esc(a.client || '—') + '</td>' +
+            '<td>' + (a.blocked ? '<span style="color:var(--danger)">blocked</span>' : esc(a.state)) + '</td>' +
+            '<td class="muted">' + esc(a.wait || '—') + '</td>' +
+            '<td class="mono">' + esc((a.query || '').slice(0, 160)) + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    } else {
+      h += '<p class="muted" style="margin-top:12px">Nothing is running right now.</p>';
+    }
+
+    if (d.slow_history.length) {
+      h += '<h4 style="margin:18px 0 8px">Slow queries (&gt; ' + (d.slow_query_ms / 1000) + 's)</h4>';
+      h += '<p class="muted">Seen in the last minute of polling. Literals are collapsed, so 50 ' +
+           'near-identical queries group into one row.</p>';
+      h += '<table><thead><tr><th>Worst</th><th>Last</th><th>Wait</th><th>Query</th></tr></thead><tbody>' +
+        d.slow_history.map(function (e) {
+          return '<tr><td>' + e.max_s.toFixed(1) + 's</td><td>' + e.last_s.toFixed(1) + 's</td>' +
+            '<td class="muted">' + esc(e.wait || '—') + '</td>' +
+            '<td class="mono">' + esc(e.query.slice(0, 200)) + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    // Persisted event log. Polling alone cannot catch a block that starts and
+    // clears between two samples -- which is exactly the "it showed blocked then
+    // vanished" case. The server keeps these, so they survive the event ending.
+    if (d.events && d.events.length) {
+      h += '<h4 style="margin:18px 0 8px">Event log</h4>';
+      h += '<p class="muted">Kept after the fact, so a block that has already cleared is still here.</p>';
+      h += '<table><thead><tr><th>When</th><th>What</th><th>Detail</th></tr></thead><tbody>' +
+        d.events.map(function (e) {
+          var color = e.severity === 'danger' ? 'var(--danger)' : 'var(--warn)';
+          var detail = e.extra && e.extra.query ? '<div class="mono muted">' + esc(e.extra.query) + '</div>' : '';
+          if (e.extra && e.extra.blocker) {
+            detail += '<div class="mono" style="color:var(--danger)">blocked by: ' + esc(e.extra.blocker) + '</div>';
+          }
+          return '<tr><td class="muted">' + esc(String(e.at).slice(11, 19)) + '</td>' +
+            '<td style="color:' + color + '">' + esc(e.message) + '</td>' +
+            '<td>' + detail + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    $('queryWrap').innerHTML = h;
+  }
+
+  function loadQueries() {
+    return api('/api/envadmin/db/queries')
+      .then(renderQueries)
+      .catch(function (e) { $('queryWrap').innerHTML = '<p class="muted">query stats unavailable: ' + esc(e.message) + '</p>'; });
+  }
+
+  // ---- who is connected ----------------------------------------------------
+  function renderClients(d) {
+    if (!d.clients || !d.clients.length) {
+      $('clientWrap').innerHTML = '<p class="muted">No connections.</p>';
+      return;
+    }
+    $('clientWrap').innerHTML =
+      '<table><thead><tr><th>From</th><th>App</th><th>State</th><th>Conns</th><th>Longest Idle</th><th>Longest Running</th></tr></thead><tbody>' +
+      d.clients.map(function (c) {
+        return '<tr><td class="mono">' + esc(c.client) + '</td>' +
+          '<td class="mono">' + esc(c.app) + '</td>' +
+          '<td>' + esc(c.state) + '</td>' +
+          '<td>' + c.conns + '</td>' +
+          '<td>' + (c.idle_s != null ? Math.round(c.idle_s) + 's' : '—') + '</td>' +
+          '<td>' + (c.running_s != null ? Math.round(c.running_s) + 's' : '—') + '</td></tr>';
+      }).join('') + '</tbody></table>' +
+      '<p class="hint">A real user arrives as an IP. <code>local socket</code> is this backend on the ' +
+      'same box, and the /32 suffix entries are the RDS proxy path.</p>';
+  }
+
+  function loadClients() {
+    return api('/api/envadmin/db/clients')
+      .then(renderClients)
+      .catch(function (e) { $('clientWrap').innerHTML = '<p class="muted">unavailable: ' + esc(e.message) + '</p>'; });
+  }
+
+  function showDeadlocks() {
+    var body = $('dbDlgBody');
+    body.innerHTML = '<p class="muted">Reading lock state…</p>';
+    if (!$('dbDialog').open) $('dbDialog').showModal();
+    api('/api/envadmin/db/deadlocks').then(function (d) {
+      var h = '';
+
+      h += '<p><strong>' + fmtNum(d.deadlocks_total) + ' deadlock' + (d.deadlocks_total === 1 ? '' : 's') +
+           '</strong> since the counters were last reset' +
+           (d.stats_reset ? ' (' + esc(String(d.stats_reset).slice(0, 19).replace('T', ' ')) + ' UTC).' : '.') +
+           ' Postgres does not keep the details of a deadlock &mdash; only this count. ' +
+           'Which two transactions collided exists solely in the server log, so a past ' +
+           'deadlock cannot be reconstructed by any query.</p>';
+
+      if (!d.can_diagnose_future) {
+        h += '<p style="color:var(--warn)"><strong>log_lock_waits is off.</strong> The server is ' +
+             'writing nothing when a session waits on a lock, so the next deadlock will be just as ' +
+             'undiagnosable as this one. On RDS this needs the parameter group changed and the ' +
+             'instance rebooted.</p>';
+      } else {
+        h += '<p style="color:var(--accent2)">log_lock_waits is on, so lock waits are being ' +
+             'written to the log and the next deadlock will be diagnosable.</p>';
+      }
+
+      h += '<p class="muted">deadlock_timeout ' + d.deadlock_timeout_ms + 'ms &middot; ' +
+           'lock_timeout ' + d.lock_timeout_ms + 'ms</p>';
+
+      if (d.blocked_now && d.blocked_now.length) {
+        h += '<h4 style="margin:16px 0 8px">Blocked right now (' + d.blocked_now.length + ')</h4>';
+        h += '<table><thead><tr><th>PID</th><th>Wait</th><th>Held for</th><th>Waiting for</th><th>Query</th></tr></thead><tbody>' +
+          d.blocked_now.map(function (b) {
+            return '<tr><td class="mono">' + b.pid + '</td>' +
+              '<td>' + esc((b.wait_event_type || '') + ' ' + (b.wait_event || '')) + '</td>' +
+              '<td>' + (b.running_s != null ? Math.round(b.running_s) + 's' : '—') + '</td>' +
+              '<td class="mono">' + esc(b.waiting_mode + (b.waiting_on ? ' on ' + b.waiting_on : '')) + '</td>' +
+              '<td class="mono">' + esc((b.query || '').slice(0, 120)) + '</td></tr>';
+          }).join('') + '</tbody></table>';
+      } else {
+        h += '<p class="muted" style="margin-top:16px">No sessions are blocked on a lock at this ' +
+             'moment. A deadlock is by nature a transient event, so an empty list here does not ' +
+             'mean they are not happening &mdash; it means none are in flight right now.</p>';
+      }
+
+      body.innerHTML = h;
+    }).catch(function (e) {
+      body.innerHTML = '<p style="color:var(--danger)">' + esc(e.message) + '</p>';
+    });
+  }
+
+  function loadDb() {
+    return api('/api/envadmin/db').then(function (d) {
+      renderDb(d);
+    }).catch(function (e) {
+      $('dbCards').innerHTML = card('Database', 'unavailable', { small: true });
+      $('dbWrap').innerHTML = '';
+      $('dbHint').textContent = 'Could not read database stats: ' + e.message;
     });
   }
 
@@ -714,6 +1007,7 @@
     btn.disabled = false;
     btn.textContent = 'Restart backend';
     if (allEnvActive) loadAllEnvs(); else loadProjects();
+    loadDb();
     if (s) {
       lastSystem = s;
       renderSystem(s);
@@ -722,6 +1016,7 @@
     } else {
       setStatus('connected', 'ok');
       loadSystem();
+      loadDb();
       toast('Backend is back online', 'ok');
     }
     if ($('envDialog').open) loadEnv();
@@ -814,10 +1109,27 @@
     toast('Token saved', 'ok');
   });
 
+  $('dbDlgClose').addEventListener('click', function () { $('dbDialog').close(); });
+
   // ---- init ---------------------------------------------------------------
   loadSystem();
   loadProjects();
+  loadDb();
+  loadQueries();
+  loadClients();
   setInterval(loadSystem, 15000);
+  // The /db call sleeps 1s server-side to sample a rate, so poll it less often
+  // than the host stats -- every call holds a pool connection for that second.
+  setInterval(loadDb, 20000);
+  // Queries poll fastest: this is the live view, and a spike that lasts 10
+  // seconds is exactly what you are trying to catch.
+  // Queries poll every 10s, not 5s. Each poll runs several pg_stat_activity
+  // scans, so a 5s cadence made the panel a visible share of the database load
+  // it was trying to measure -- and a blocked event shorter than the interval was
+  // still invisible. The server-side event log, not this cadence, is what
+  // catches brief blocks.
+  setInterval(loadQueries, 10000);
+  setInterval(loadClients, 20000);
 })();
 </script>
 </body>

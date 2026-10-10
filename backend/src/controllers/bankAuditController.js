@@ -265,6 +265,22 @@ export const listEntries = async (req, res) => {
         if (e.verify_fro_worker_id) e.verify_fro_name = mvNameById[e.verify_fro_worker_id] || null;
       }
     }
+    // Entries that were sent back to audit by an Unclaimed-tab claim carry
+    // matched_lead_log_id pointing at a lead with disposition_category=
+    // 'suspense_claim'. Flag them so the tile can glow in the Accounts UI.
+    const matchedIds = [...new Set((entries || []).map(e => e.matched_lead_log_id).filter(Boolean))];
+    if (matchedIds.length > 0) {
+      const { data: ucLogs } = await db
+        .from('fro_donor_logs')
+        .select('id, disposition_category')
+        .in('id', matchedIds)
+        .eq('disposition_category', 'suspense_claim');
+      const ucSet = new Set((ucLogs || []).map(l => l.id));
+      for (const e of entries || []) {
+        if (e.matched_lead_log_id && ucSet.has(e.matched_lead_log_id)) e.suspense_claimed = true;
+      }
+    }
+
     // Receipt-linked logs drive the primary "Claimed by" tag; after a receipt
     // go-back the entry only keeps its match link, so fall back to the matched
     // lead's FRO (same pending-log rule) to keep the claim visible.

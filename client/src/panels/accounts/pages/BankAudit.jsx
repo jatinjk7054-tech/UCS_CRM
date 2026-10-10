@@ -468,8 +468,8 @@ function EntrySection({loading,entries,sources,summary,error,statusTab,setStatus
     <div className="entry-scroll" ref={sharedListRef} onScroll={onListScroll}>
       <div className="entry-grid">
         {loading ? Array.from({length:5}).map((_,i)=>
-          <div key={i} className="entry-card">
-            <div className="ec-main">
+          <div key={i} className="entry-card is-skeleton">
+          <div className="ec-main">
               <div className="ec-primary">
                 <div className="sk" style={{width:'45%',height:13,borderRadius:4}}/>
                 <div className="sk" style={{width:'60%',height:10,borderRadius:4,marginTop:6}}/>
@@ -486,10 +486,11 @@ function EntrySection({loading,entries,sources,summary,error,statusTab,setStatus
         ) : pageItems.map((e,idx)=>{
         const ngoColor=NGO_CARD[ngoOf(e)];
         return (
-        <div key={e.id||idx} data-entry-id={e.id} className={'entry-card'+(e.kind==='suspense'?' is-suspense':'')+((e.match_status==='matched'||e.match_status==='confirmed')?(e.match_source==='manual'?' is-match-manual':e.match_source==='static_fro'?' is-match-static':' is-match-auto'):' is-match-unmatched')+(selectedEntryId===e.id?' is-selected':'')}
+        <div key={e.id||idx} data-entry-id={e.id} className={'entry-card'+(e.kind==='suspense'?' is-suspense':'')+((e.match_status==='matched'||e.match_status==='confirmed')?(e.match_source==='manual'?' is-match-manual':e.match_source==='static_fro'?' is-match-static':' is-match-auto'):' is-match-unmatched')+(e.suspense_claimed?' is-suspense-claimed':'')+(selectedEntryId===e.id?' is-selected':'')}
           style={ngoColor?{background:ngoColor.background}:undefined}
           onClick={()=>{if(clickRef.current)clearTimeout(clickRef.current);clickRef.current=setTimeout(()=>{clickRef.current=null;onOpen(e)},300)}}
           onDoubleClick={()=>{if(clickRef.current){clearTimeout(clickRef.current);clickRef.current=null}if(!onSelectEntry||!selectionEnabled||e.match_source==='auto'||e.match_status==='confirmed')return;if(selectedEntryId===e.id)onSelectEntry(null);else onSelectEntry(e)}}>
+          {e.suspense_claimed&&<span className="twinkle-corner"><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0L14.59 8.41L23 11L14.59 13.59L12 22L9.41 13.59L1 11L9.41 8.41Z"/></svg></span>}
           <div className="ec-main">
             <div className="ec-primary">
               <div className="ec-title">{e.payer_name||'\u2014'}</div>
@@ -514,13 +515,14 @@ function EntrySection({loading,entries,sources,summary,error,statusTab,setStatus
           </div>
           <div className="ec-meta">
             <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '6px 10px', minWidth: 0, flex: 1 }}>
+              {e.suspense_claimed&&<span style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:9,fontWeight:700,letterSpacing:'.4px',padding:'3px 8px',borderRadius:4,background:'#fef3c7',color:'#92400e',whiteSpace:'nowrap'}} title="Claimed from the Unclaimed suspense pool"><span className="pulse-dot"/>Suspense Claimed</span>}
               {e.match_status==='matched'&&<span style={{display:'inline-flex',alignItems:'center',gap:4,fontSize:9,fontWeight:700,letterSpacing:'.4px',padding:'3px 8px',borderRadius:4,background:'#ffedd5',color:'#c2410c',whiteSpace:'nowrap'}}>MATCHED</span>}
               {e.match_status==='confirmed'&&<span style={{display:'inline-flex',alignItems:'center',gap:4,fontSize:9,fontWeight:700,letterSpacing:'.4px',padding:'3px 8px',borderRadius:4,background:'#e8f0e4',color:'#5B6B4E',whiteSpace:'nowrap'}}>CONFIRMED</span>}
               {!e.match_status&&<span className="pill pill-yellow">Pending</span>}
               <span className="pill pill-gray">{e.bank_audit_sources?.name||getSrcName(e.source_id)}</span>
               <span className="ec-ref">{e.payment_id||e.check_id||'\u2014'}</span>
             </div>
-            <span className="pill" style={{ marginLeft: 'auto', alignSelf: 'center', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0, background: (NGO_STYLE[ngoOf(e)]||{background:'#f3f4f6',color:'#6b7280'}).background, color: (NGO_STYLE[ngoOf(e)]||{background:'#f3f4f6',color:'#6b7280'}).color, borderRadius: 999, padding: '3px 10px' }}>{NGO_LABELS[ngoOf(e)]||'\u2014'}</span>
+            <span className="pill" style={{ marginLeft: 'auto', alignSelf: 'center', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0, background: (NGO_STYLE[ngoOf(e)]||{background:'#f3f4f6',color:'#6b7280'}).background, color: (NGO_STYLE[ngoOf(e)]||{background:'#f3f4f6',color:'#6b7280'}).color, borderRadius: 4, padding: '3px 10px' }}>{NGO_LABELS[ngoOf(e)]||'\u2014'}</span>
           </div>
         </div>
         );

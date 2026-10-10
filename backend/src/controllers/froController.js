@@ -17,6 +17,7 @@ import {
 } from '../models/froAssignmentModel.js';
 import { getTargetByWorker, getLatestTargetBeforeMonth } from '../models/froTargetModel.js';
 import { classifyLogSide, bustTlCache } from './ngoAdminController.js';
+import { isCategoryLabel } from '../services/froCollectionMatch.js';
 import { getUserNgoAccess } from '../models/userNgoAccessModel.js';
 import { getOfficeStart, getOfficeEnd } from '../utils/attendanceStatus.js';
 import {
@@ -47,7 +48,6 @@ import {
   updateDonorLog,
   findLogsByDonorAndWorker,
   findLogsByAssignment,
-  getTotalCollectedByWorker,
   getWorkerCollectionReceipts,
   getCollectedByNgo,
   getTotalCollectedByAssignment,
@@ -80,6 +80,17 @@ const FRO_DASHBOARD_TTL_MS = 30 * 1000;
 const FRO_TARGET_TTL_MS = 30 * 1000;
 const FRO_SEARCH_TTL_MS = 60 * 1000;
 const FRO_SEARCH_SCOPE_TTL_MS = 60 * 1000;
+// The receipts loader behind getWorkerCollectionReceipts is the single most
+// repeated query in the app (pg_stat_statements: 3.1M calls). It was cached for
+// the dashboard but NOT here, so every /fro/my-collections request re-ran the
+// full scan with nothing to collapse concurrent callers. `cached()` rather than
+// cacheGet/cacheSet because it also shares the in-flight promise: several FROs
+// refreshing at once caused one rebuild instead of one each.
+//
+// 60s, not 30s, because this endpoint is refetched on every mount and every
+// filter change -- well above the rate the underlying data changes. Writes still
+// invalidate via invalidateFroCaches(), so a donation shows up immediately.
+const FRO_RECEIPTS_TTL_MS = 60 * 1000;
 // My Leads runs 11+ sequential queries per request, so it is the most expensive
 // read in this file and the one refetched most often - the client re-requests it
 // on every mount, on every station/NGO/tab change (up to 3x per load), and on
@@ -153,6 +164,12 @@ export function invalidateFroCaches(workerId) {
   cacheDelPrefix(`fro:target:${workerId}:`);
   cacheDelPrefix(`fro:search:${workerId}:`);
   cacheDelPrefix(`fro:donors:${workerId}:`);
+  // The receipts cache is keyed by the worker whose money is being counted, which
+  // under work-as is the COVERED worker (imposter_id), not the session holder.
+  // Callers pass that id, so clearing on it keeps a donation visible immediately
+  // instead of after the 60s TTL. Omitting this is what would have made the
+  // Collected card look stale right after a receipt was written.
+  cacheDelPrefix(`fro:receipts:${workerId}:`);
   // Upstash cannot delete a prefix cheaply, but this namespace stays small - one
   // key per live filter combination for that worker, and oversized views are
   // never written - so a bounded SCAN is a couple of round-trips, which is noise
@@ -753,7 +770,14 @@ export const getDashboard = async (req, res) => {
     const monthStr = monthBounds.month;
     const creditWorkerId = req.user.impersonation && req.user.imposter_id ? req.user.imposter_id : workerId;
 
-    const collected = await getTotalCollectedByWorker(creditWorkerId, monthStart, monthEnd);
+    // Cache the ROWS, not the total, and reduce here. getTotalCollectedByWorker is
+    // itself just a reduce over these rows, so caching its scalar under the same
+    // key the collections list uses would have the two callers fight over one
+    // entry -- whoever ran first would leave the other reading a number where it
+    // expected rows. One cache, one type.
+    const collectedRows = await cached(`fro:receipts:${creditWorkerId}:${monthStart}:${monthEnd}`, FRO_RECEIPTS_TTL_MS,
+      () => getWorkerCollectionReceipts(creditWorkerId, monthStart, monthEnd));
+    const collected = (collectedRows || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
 
     const [manualTarget, priorTarget] = await Promise.all([
       getTargetByWorker(workerId, monthStr),
@@ -1346,7 +1370,13 @@ export const getMyCollections = async (req, res) => {
     // verified-in-month union, so the two disagreed: backdated-but-verified
     // receipts appeared in the total but not in the list, and a printed name
     // needing a trim or a case fold matched one and not the other.
-    const receipts = await getWorkerCollectionReceipts(creditWorkerId, monthStart, monthEnd);
+    // Cached because this is the app's most repeated query, and this handler was
+    // re-running it on every mount and filter change with nothing to collapse
+    // concurrent callers. Keyed by the same (worker, window) pair the loader
+    // actually depends on, so two FROs never share an entry.
+    const receiptsKey = `fro:receipts:${creditWorkerId}:${monthStart}:${monthEnd}`;
+    const receipts = await cached(receiptsKey, FRO_RECEIPTS_TTL_MS, () =>
+      getWorkerCollectionReceipts(creditWorkerId, monthStart, monthEnd));
 
     const { data: allNgos } = await db.from('ngos').select('id, name');
     const normProj = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
@@ -1475,7 +1505,7 @@ export const getSuspenseReceipts = async (req, res) => {
     const workerId = req.user.id;
     // Suspense is a shared pool: every FRO sees their assigned NGO AND all
     // other NGOs' unclaimed receipts here (NGO pills on the frontend filter).
-    const { month } = currentMonthBoundsIST();
+    const { month, monthStart } = currentMonthBoundsIST();
 
     const { data: entries, error: eErr } = await db
       .from('bank_audit_entries')
@@ -1490,7 +1520,7 @@ export const getSuspenseReceipts = async (req, res) => {
     if (receiptIds.length > 0) {
       const { data: receipts } = await db
         .from('receipts')
-          .select('id, log_id, donor_name, donor_mobile, amount, receipt_date, receipt_time, project_id')
+          .select('id, log_id, donor_name, donor_mobile, amount, receipt_date, receipt_time, project_id, agent_name')
         .in('id', receiptIds);
       for (const r of (receipts || [])) receiptMap[r.id] = r;
     }
@@ -1499,6 +1529,9 @@ export const getSuspenseReceipts = async (req, res) => {
       const r = receiptMap[e.receipt_id] || {};
       // Receipt already linked to a lead (credited to an FRO) — skip.
       if (r.log_id) return null;
+      // Receipts parked under the category label "suspense" belong only in the
+      // Unclaimed tab — keep them out of the regular All pool entirely.
+      if (isCategoryLabel(r.agent_name) || isCategoryLabel(e.agent_name)) return null;
       return {
         id: e.receipt_id,
         entry_id: e.id,
@@ -1522,6 +1555,8 @@ export const getSuspenseReceipts = async (req, res) => {
 
     for (const e of entries || []) {
       if (e.receipt_id) continue;
+      // Numberless entries parked under "suspense" also belong only in Unclaimed.
+      if (isCategoryLabel(e.agent_name)) continue;
       pool.push({
         id: `entry-${e.id}`,
         entry_id: e.id,
@@ -1536,6 +1571,75 @@ export const getSuspenseReceipts = async (req, res) => {
         has_receipt: false,
         waiting_receipt_no: !!e.verify_fro_worker_id,
       });
+    }
+
+    // Unclaimed pool: receipts parked under the category label "suspense" —
+    // money Accounts already verified (receipt created, number allocated) but
+    // that never got credited to a real FRO. Includes receipts still linked to
+    // the placeholder "suspense" worker's log; excludes any receipt whose log
+    // belongs to a real FRO (already owned/counted there) and any receipt the
+    // entry pool above already lists.
+    const entryPoolReceiptIds = new Set(pool.filter(r => r.has_receipt).map(r => r.id));
+    try {
+      const { data: unclaimedRows, error: uErr } = await db
+        .from('receipts')
+        .select('id, log_id, donor_name, donor_mobile, amount, receipt_date, receipt_time, project_id, payment_id')
+        .or('agent_name.ilike.suspense')
+        .gte('receipt_date', monthStart)
+        .order('receipt_date', { ascending: false })
+        .limit(500);
+      if (uErr) throw uErr;
+      const ucRows = (unclaimedRows || []).filter(r => !entryPoolReceiptIds.has(r.id));
+      if (ucRows.length > 0) {
+        const ucIds = ucRows.map(r => r.id);
+        const [{ data: ucEntries }, { data: ucLogs }] = await Promise.all([
+          db.from('bank_audit_entries')
+            .select('id, receipt_id, receipt_no, payer_name, payment_id, amount, status, project_id')
+            .in('receipt_id', ucIds),
+          db.from('fro_donor_logs')
+            .select('id, fro_worker_id')
+            .in('id', ucRows.map(r => r.log_id).filter(Boolean)),
+        ]);
+        // A receipt parked on the placeholder "suspense" worker (or with no log
+        // at all) is unclaimed; one whose log sits on a real FRO is owned.
+        let placeholderIds = new Set();
+        const ownerIds = [...new Set((ucLogs || []).map(l => l.fro_worker_id).filter(Boolean))];
+        if (ownerIds.length > 0) {
+          const { data: phWorkers } = await db.from('workers').select('id').in('id', ownerIds).ilike('name', 'suspense');
+          for (const w of (phWorkers || [])) placeholderIds.add(w.id);
+        }
+        const entryByReceipt = {};
+        for (const e of (ucEntries || [])) {
+          const cur = entryByReceipt[e.receipt_id];
+          // Prefer the verified bank line: it is the money's audit entry.
+          if (!cur || (e.status === 'verified' && cur.status !== 'verified')) entryByReceipt[e.receipt_id] = e;
+        }
+        const logById = {};
+        for (const l of (ucLogs || [])) logById[l.id] = l;
+        for (const r of ucRows) {
+          const parked = !r.log_id || (logById[r.log_id] && placeholderIds.has(logById[r.log_id].fro_worker_id));
+          if (!parked) continue;
+          const e = entryByReceipt[r.id] || {};
+          pool.push({
+            id: r.id,
+            entry_id: e.id || null,
+            receipt_no: e.receipt_no || null,
+            donor_name: e.payer_name || r.donor_name || null,
+            donor_mobile: r.donor_mobile || null,
+            amount: r.amount || e.amount,
+            receipt_date: r.receipt_date,
+            receipt_time: r.receipt_time,
+            project_id: r.project_id || e.project_id,
+            payment_id: e.payment_id || r.payment_id || null,
+            has_receipt: true,
+            // Receipt numbers are already allocated for these; claiming is open.
+            waiting_receipt_no: false,
+            pool: 'unclaimed',
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Suspense unclaimed pool load failed:', e.message);
     }
 
     const poolIds = pool.filter(r => r.has_receipt).map(r => r.id);
@@ -1568,7 +1672,8 @@ export const getSuspenseReceipts = async (req, res) => {
       receipt_time: r.receipt_time,
       project_id: r.project_id,
       payment_id: r.payment_id || null,
-      kind: r.has_receipt ? 'entry' : 'no_receipt',
+      kind: r.pool === 'unclaimed' ? 'unclaimed' : (r.has_receipt ? 'entry' : 'no_receipt'),
+      pool: r.pool || 'entry',
       waiting_receipt_no: r.waiting_receipt_no || false,
       _bank_audit_entry_id: r.entry_id,
       claim_count: claimCountByReceipt[r.id] || 0,
@@ -1750,6 +1855,48 @@ const linkClaimAuditEntry = async (entry, receiptId, logId, workerId, donorId, w
   }
 };
 
+// Unclaimed-claim counterpart of linkClaimAuditEntry: the entry was already
+// verified (Accounts parked the money on the suspense bucket), so claiming it
+// must send it BACK into the audit — status unverified, linked to the new lead
+// — so Accounts sees it with its receipt number, fills the details and credits
+// the amount. Never blocks the claim if the write fails.
+const sendClaimAuditEntryToAudit = async (entry, receiptId, logId, workerId, donorId, workerName) => {
+  if (!entry?.id) return;
+  // Already linked to a different lead — leave it alone.
+  if (entry.matched_lead_log_id != null && String(entry.matched_lead_log_id) !== String(logId)) return;
+
+  const patch = {
+    status: 'unverified',
+    // Remember the audit status the entry had BEFORE this claim so a later
+    // lead reject can restore it exactly (a manually-verified suspense entry
+    // must go back to verified, not stay unverified).
+    pre_claim_status: entry.status || null,
+    match_status: 'matched',
+    match_source: 'manual',
+    matched_lead_log_id: logId,
+    receipt_id: receiptId,
+    matched_by: workerId,
+    matched_at: new Date().toISOString(),
+    agent_name: workerName || null,
+    donor_id: donorId || entry.donor_id || null,
+    // Clear the manual-verify assignment marker so the entry does not park as
+    // "waiting for receipt number" now that a real claim exists.
+    verify_fro_worker_id: null,
+    updated_at: new Date().toISOString(),
+  };
+  if (!entry.match_no) {
+    try {
+      const { rows } = await db._pool.query("SELECT nextval('bank_audit_match_no_seq') AS n");
+      patch.match_no = 'MTCH-' + String(rows[0].n).padStart(6, '0');
+    } catch (e) { console.error('Match no allocation failed:', e.message); }
+  }
+  try {
+    await db.from('bank_audit_entries').update(patch).eq('id', entry.id);
+  } catch (e) {
+    console.error('Send claim audit entry back to audit failed:', e.message);
+  }
+};
+
 export const claimSuspenseReceipt = async (req, res) => {
   try {
     const workerId = req.user.id;
@@ -1817,14 +1964,21 @@ export const claimSuspenseReceipt = async (req, res) => {
 
     const { data: receipt, error: rErr } = await db
       .from('receipts')
-      .select('id, donor_id, log_id, project_id, receipt_date, receipt_time, amount, donor_name, donor_mobile, payment_id, mode, pan_number, address, email, bank_payer_name')
+      .select('id, donor_id, log_id, agent_name, project_id, receipt_date, receipt_time, amount, donor_name, donor_mobile, payment_id, mode, pan_number, address, email, bank_payer_name')
       .eq('id', receiptId)
       .single();
     if (rErr || !receipt) return res.status(404).json({ message: 'Receipt not found' });
 
+    // Unclaimed pool: receipts parked under a category label (the "suspense"
+    // bucket) — money Accounts verified but never credited to a real FRO. They
+    // carry a placeholder donor and may still point at the placeholder
+    // "suspense" worker's log, but no human owns them. Claiming one is the
+    // handover: the FRO picks the real donor and the money moves.
+    const isUnclaimed = isCategoryLabel(receipt.agent_name);
+
     // Detect "receipt_sent" entries: receipt has a donor but no log (no FRO assigned).
-    const isReceiptSent = receipt.donor_id != null && receipt.log_id == null;
-    if (!isReceiptSent) {
+    const isReceiptSent = !isUnclaimed && receipt.donor_id != null && receipt.log_id == null;
+    if (!isReceiptSent && !isUnclaimed) {
       if (receipt.donor_id) return res.status(409).json({ message: 'This receipt is already linked to a donor' });
       if (receipt.log_id) return res.status(409).json({ message: 'This receipt has already been claimed' });
     }
@@ -2124,6 +2278,10 @@ export const claimSuspenseReceipt = async (req, res) => {
         operator_id: creditWorkerId === workerId ? null : creditWorkerId,
         action: 'disposition',
         disposition_detail: 'lead_done',
+        // Marks a lead created by claiming an Unclaimed-tab receipt so Accounts'
+        // reject/go-back can put the money back in the Unclaimed pool (restore
+        // receipts.agent_name = 'suspense') instead of the regular suspense pool.
+        disposition_category: isUnclaimed ? 'suspense_claim' : null,
         amount_collected: receipt.amount,
         accounts_status: 'pending',
         payment_screenshot_url: screenshot_url || null,
@@ -2144,6 +2302,46 @@ export const claimSuspenseReceipt = async (req, res) => {
 
     await linkClaimDonorToAuditEntry(receiptId, donorId, { donor_mobile, donor_city, donor_email, donor_pan, donor_address });
     await linkClaimAuditEntry(auditEntry, receiptId, log.id, creditWorkerId, donorId, creditWorkerName);
+
+    // Unclaimed-claim handover: stamp the chosen donor onto the receipt (it was
+    // parked with a placeholder donor), retire the placeholder "suspense" log
+    // the money sat on so the amount is counted exactly once — on this new lead
+    // — and send the bank audit entry BACK into Accounts Bank Audit (status
+    // unverified, linked to this lead) so Accounts fills the details and credits.
+    if (isUnclaimed) {
+      try {
+        await db.from('receipts').update({
+          donor_id: donorId,
+          donor_name: claimedDonorName || donorName || null,
+          donor_mobile: donor_mobile || receipt.donor_mobile || null,
+        }).eq('id', receiptId);
+      } catch (e) { console.error('Failed to stamp donor on claimed unclaimed receipt:', e.message); }
+
+      // Retire only a log parked on the placeholder "suspense" worker — a log
+      // owned by a real FRO would be double-counted removal, and unclaimed
+      // receipts never point at one anyway (filtered out of the pool).
+      if (receipt.log_id) {
+        try {
+          const { data: oldLog } = await db
+            .from('fro_donor_logs')
+            .select('id, fro_worker_id')
+            .eq('id', receipt.log_id)
+            .maybeSingle();
+          const phWorker = oldLog?.fro_worker_id
+            ? await db.from('workers').select('id').eq('id', oldLog.fro_worker_id).ilike('name', 'suspense').maybeSingle()
+            : null;
+          if (phWorker?.data) {
+            await db.from('fro_donor_logs').update({
+              amount_collected: 0,
+              accounts_status: 'rejected',
+              rejection_reason: `Claimed by ${creditWorkerName || 'an FRO'} — moved to lead ${log.id}`,
+            }).eq('id', oldLog.id);
+          }
+        } catch (e) { console.error('Failed to retire placeholder suspense log on claim:', e.message); }
+      }
+
+      await sendClaimAuditEntryToAudit(auditEntry, receiptId, log.id, creditWorkerId, donorId, creditWorkerName);
+    }
 
     // For receipt_sent entries, transition the bank_audit_entry status from
     // "receipt_sent" → "unverified" and stamp the claiming FRO's name so
@@ -3652,7 +3850,12 @@ export const createDonorLogHandler = async (req, res) => {
     // collection, the workable stack and (for a donation) suppression. Drop the
     // cached reads so the refresh the client fires right after this response
     // already sees the new state rather than a pre-disposition payload.
+    //
+    // The receipts cache is keyed by the worker whose money is counted, which
+    // under work-as is the COVERED worker, not the session holder. Invalidate
+    // both or a donation logged while covering stays hidden for the full TTL.
     invalidateFroCaches(req.user.id);
+    if (req.user.impersonation && req.user.imposter_id) invalidateFroCaches(req.user.imposter_id);
 
     return res.json({ message: 'Log entry created', data: result, timer });
   } catch (error) {
@@ -3857,7 +4060,11 @@ export const getMyTarget = async (req, res) => {
 
     const { allowedNgoIds } = await getMyStationScope(workerId, froActPairs(req));
     const creditWorkerId = req.user.impersonation && req.user.imposter_id ? req.user.imposter_id : workerId;
-    const collected = await getTotalCollectedByWorker(creditWorkerId, monthStart, monthEnd);
+    // Same rows as the dashboard and the collections list, reduced here, so all
+    // three share one scan instead of each running its own.
+    const collectedRows = await cached(`fro:receipts:${creditWorkerId}:${monthStart}:${monthEnd}`, FRO_RECEIPTS_TTL_MS,
+      () => getWorkerCollectionReceipts(creditWorkerId, monthStart, monthEnd));
+    const collected = (collectedRows || []).reduce((sum, r) => sum + Number(r.amount || 0), 0);
     const collectedByNgo = await getCollectedByNgo(creditWorkerId, monthStart, monthEnd, allowedNgoIds);
 
     // Resolve NGO names for the breakdown
